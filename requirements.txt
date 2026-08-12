@@ -1,0 +1,6 @@
+Flask==3.0.3
+APScheduler==3.10.4
+pywebpush==2.0.0
+webuntis==0.1.25
+requests==2.32.3
+gunicorn==22.0.0
