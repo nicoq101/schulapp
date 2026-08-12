@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Schulapp</title>
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#12141C" />
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+<div id="app">
+
+  <div class="topbar">
+    <div>
+      <div class="greeting" id="greeting">Guten Morgen</div>
+      <h1 id="today-label">Heute</h1>
+    </div>
+    <button class="icon-btn" id="notif-btn" aria-label="Benachrichtigungen">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      <span class="dot"></span>
+    </button>
+  </div>
+
+  <!-- ===================== DASHBOARD ===================== -->
+  <section class="screen active" id="screen-dashboard">
+    <div class="tile-grid">
+      <div class="tile">
+        <div class="value mono" id="tile-next">–</div>
+        <div class="label">Nächste Stunde</div>
+      </div>
+      <div class="tile">
+        <div class="value mono" id="tile-remaining">–</div>
+        <div class="label">Stunden heute</div>
+      </div>
+      <div class="tile">
+        <div class="value mono" id="tile-tasks">–</div>
+        <div class="label">Offene Aufgaben</div>
+      </div>
+      <div class="tile">
+        <div class="value mono" id="tile-exam">–</div>
+        <div class="label">Nächste Klausur</div>
+      </div>
+    </div>
+
+    <div class="section-title">Heutiger Plan</div>
+    <div class="rail" id="dashboard-rail">
+      <div class="empty-state"><div class="display">Lädt …</div></div>
+    </div>
+
+    <div class="section-title">Bald fällig</div>
+    <div class="card" id="dashboard-tasks">
+      <div class="empty-state"><div class="display">Lädt …</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== AUFGABEN ===================== -->
+  <section class="screen" id="screen-aufgaben">
+    <div class="section-title">🔴 Heute fällig</div>
+    <div class="card" id="tasks-today"></div>
+
+    <div class="section-title">🟠 Morgen fällig</div>
+    <div class="card" id="tasks-tomorrow"></div>
+
+    <div class="section-title">🟡 Diese Woche</div>
+    <div class="card" id="tasks-week"></div>
+
+    <div class="section-title">🟢 Später / Ohne Datum</div>
+    <div class="card" id="tasks-later"></div>
+  </section>
+
+  <!-- ===================== STUNDENPLAN ===================== -->
+  <section class="screen" id="screen-plan">
+    <div class="section-title">Diese Woche</div>
+    <div id="week-container"></div>
+
+    <div class="section-title">Klausuren</div>
+    <div class="card" id="exam-list"></div>
+  </section>
+
+  <!-- ===================== EINSTELLUNGEN ===================== -->
+  <section class="screen" id="screen-einstellungen">
+    <div class="section-title">Darstellung</div>
+    <div class="card">
+      <div class="segmented" id="theme-segmented">
+        <button data-theme="light">Hell</button>
+        <button data-theme="dark">Dunkel</button>
+        <button data-theme="system">System</button>
+      </div>
+    </div>
+
+    <div class="section-title">Benachrichtigungen</div>
+    <div class="card">
+      <div class="settings-row">
+        <div>
+          <div class="label">Stundenplanänderungen</div>
+          <div class="sub">Ausfall, Vertretung, Raum- & Zeitänderung</div>
+        </div>
+        <button class="switch" data-setting="notify_stundenplan"></button>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="label">Lern-Erinnerungen</div>
+          <div class="sub">Check-ins zu deinen Erinnerungszeiten</div>
+        </div>
+        <button class="switch" data-setting="notify_lernen"></button>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="label">Prüfungs-Erinnerungen</div>
+          <div class="sub">7, 3 und 1 Tag vorher</div>
+        </div>
+        <button class="switch" data-setting="notify_pruefungen"></button>
+      </div>
+      <div class="settings-row">
+        <div>
+          <div class="label">Push aktivieren</div>
+          <div class="sub" id="push-status">Noch nicht aktiviert</div>
+        </div>
+        <button class="switch" id="push-toggle"></button>
+      </div>
+    </div>
+
+    <div class="section-title">Erinnerungszeiten</div>
+    <div class="card">
+      <div id="time-chips"></div>
+      <div class="field" style="margin-top: 14px;">
+        <label>Neue Zeit hinzufügen</label>
+        <input type="time" id="new-time-input" />
+      </div>
+      <button class="btn-primary" id="add-time-btn">Zeit hinzufügen</button>
+    </div>
+
+    <div class="section-title">Personalisierung</div>
+    <div class="card">
+      <div class="field">
+        <label>Name</label>
+        <input type="text" id="setting-name" placeholder="Dein Name" />
+      </div>
+      <div class="field">
+        <label>Klasse</label>
+        <input type="text" id="setting-klasse" placeholder="z.B. 10b" />
+      </div>
+      <button class="btn-primary" id="save-profile-btn">Speichern</button>
+    </div>
+  </section>
+
+  <!-- ===================== NOTIFICATION CENTER (Overlay) ===================== -->
+  <div class="sheet-backdrop" id="notif-backdrop"></div>
+  <div class="sheet" id="notif-sheet" style="max-height: 75vh; overflow-y: auto;">
+    <h3>Benachrichtigungen</h3>
+    <div id="notif-list"></div>
+  </div>
+
+  <!-- ===================== ADD TASK SHEET ===================== -->
+  <div class="sheet-backdrop" id="add-backdrop"></div>
+  <div class="sheet" id="add-sheet">
+    <h3>Neuer Eintrag</h3>
+    <div class="type-toggle">
+      <button data-typ="hausaufgabe" class="active">📚 Hausaufgabe</button>
+      <button data-typ="pruefung">📝 Klausur</button>
+    </div>
+    <div class="field">
+      <label>Fach</label>
+      <input type="text" id="new-fach" placeholder="z.B. Mathe" />
+    </div>
+    <div class="field">
+      <label>Was ist zu tun?</label>
+      <input type="text" id="new-text" placeholder="z.B. Buch S. 42, Nr. 3-5" />
+    </div>
+    <div class="field">
+      <label>Fällig am</label>
+      <input type="date" id="new-faellig" />
+    </div>
+    <button class="btn-primary" id="save-task-btn">Speichern</button>
+  </div>
+
+  <button class="fab" id="fab-add">+</button>
+
+  <nav class="tabbar">
+    <button class="tab active" data-screen="dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+      Dashboard
+    </button>
+    <button class="tab" data-screen="aufgaben">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      Aufgaben
+    </button>
+    <button class="tab" data-screen="plan">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+      Plan
+    </button>
+    <button class="tab" data-screen="einstellungen">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      Einstellungen
+    </button>
+  </nav>
+
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
