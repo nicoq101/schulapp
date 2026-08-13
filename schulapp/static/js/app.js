@@ -123,8 +123,11 @@ function renderDashboard() {
   // Tiles: offene Aufgaben
   document.getElementById("tile-tasks").textContent = state.tasks.length;
 
-  // Tiles: nächste Klausur
-  const nextExam = [...state.exams].sort((a, b) => a.date.localeCompare(b.date))[0];
+  // Tiles: nächste Klausur (automatisch von WebUntis + manuell eingetragen)
+  const manualExamsForTile = state.tasks
+    .filter((t) => t.typ === "pruefung" && t.faellig)
+    .map((t) => ({ date: t.faellig }));
+  const nextExam = [...state.exams, ...manualExamsForTile].sort((a, b) => a.date.localeCompare(b.date))[0];
   if (nextExam) {
     const days = daysUntil(nextExam.date);
     document.getElementById("tile-exam").textContent = days === 0 ? "Heute" : `${days}d`;
@@ -288,19 +291,25 @@ function renderPlan() {
   }
 
   const examList = document.getElementById("exam-list");
-  if (state.exams.length === 0) {
-    examList.innerHTML = `<div class="empty-state">Keine Klausuren eingetragen.</div>`;
+  const manualExams = state.tasks
+    .filter((t) => t.typ === "pruefung")
+    .map((t) => ({ name: `${t.fach}: ${t.text}`, date: t.faellig, time: "" }));
+  const allExams = [...state.exams, ...manualExams].filter((e) => e.date);
+
+  if (allExams.length === 0) {
+    examList.innerHTML = `<div class="empty-state">Keine Klausuren eingetragen. Tipp: über den "+"-Button unten rechts eine hinzufügen.</div>`;
   } else {
-    examList.innerHTML = [...state.exams]
+    examList.innerHTML = [...allExams]
       .sort((a, b) => a.date.localeCompare(b.date))
       .map((e) => {
         const days = daysUntil(e.date);
-        const dayLabel = days === 0 ? "Heute" : days === 1 ? "Morgen" : `in ${days} Tagen`;
+        const dayLabel = days === 0 ? "Heute" : days === 1 ? "Morgen" : days > 1 ? `in ${days} Tagen` : fmtDate(e.date);
+        const timeText = e.time ? ` · ${e.time} Uhr` : "";
         return `
           <div class="task-row">
             <div style="flex:1;">
               <div class="task-fach">📝 ${escapeHtml(e.name)}</div>
-              <div class="task-text">${fmtDate(e.date)} · ${e.time} Uhr</div>
+              <div class="task-text">${fmtDate(e.date)}${timeText}</div>
               <div class="task-due soon">${dayLabel}</div>
             </div>
           </div>`;
