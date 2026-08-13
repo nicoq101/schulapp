@@ -323,6 +323,8 @@ def untis_login(user):
 
 
 def fetch_timetable_days(user, days_ahead=5):
+    if not user.get("untis_username"):
+        return []
     try:
         session_ = untis_login(user)
     except Exception as e:
@@ -361,6 +363,8 @@ def fetch_timetable_days(user, days_ahead=5):
 
 
 def fetch_exams(user, days_ahead=90):
+    if not user.get("untis_username"):
+        return []
     try:
         session_ = untis_login(user)
         exams = session_.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=days_ahead))
@@ -589,8 +593,10 @@ def api_register():
     untis_username = data.get("untis_username", "").strip()
     untis_password = data.get("untis_password", "")
 
-    if not username or not password or not untis_username or not untis_password:
-        return jsonify({"ok": False, "error": "Bitte alle Felder ausfüllen."}), 400
+    if not username or not password:
+        return jsonify({"ok": False, "error": "Bitte Benutzername und Passwort ausfüllen."}), 400
+
+    has_untis = bool(untis_username and untis_password)
 
     conn = get_db()
     exists = conn.execute("SELECT 1 FROM users WHERE lower(username) = lower(?)", (username,)).fetchone()
@@ -598,23 +604,27 @@ def api_register():
         conn.close()
         return jsonify({"ok": False, "error": "Dieser Benutzername ist schon vergeben."}), 400
 
-    untis_taken = conn.execute("SELECT 1 FROM users WHERE lower(untis_username) = lower(?)", (untis_username,)).fetchone()
-    if untis_taken:
-        conn.close()
-        return jsonify({"ok": False, "error": "Für diesen WebUntis-Zugang existiert bereits ein App-Account."}), 400
+    if has_untis:
+        untis_taken = conn.execute(
+            "SELECT 1 FROM users WHERE lower(untis_username) = lower(?) AND untis_username != ''", (untis_username,)
+        ).fetchone()
+        if untis_taken:
+            conn.close()
+            return jsonify({"ok": False, "error": "Für diesen WebUntis-Zugang existiert bereits ein App-Account."}), 400
     conn.close()
 
-    ok, err = try_untis_login(untis_username, untis_password)
-    if not ok:
-        return jsonify({"ok": False, "error": f"WebUntis-Zugangsdaten konnten nicht bestätigt werden. Bitte Benutzername/Passwort prüfen. ({err})"}), 400
+    if has_untis:
+        ok, err = try_untis_login(untis_username, untis_password)
+        if not ok:
+            return jsonify({"ok": False, "error": f"WebUntis-Zugangsdaten konnten nicht bestätigt werden. ({err})"}), 400
 
     conn = get_db()
 
-    enc_pw = fernet.encrypt(untis_password.encode()).decode() if fernet else untis_password
+    enc_pw = (fernet.encrypt(untis_password.encode()).decode() if fernet else untis_password) if has_untis else ""
     cur = conn.execute(
         "INSERT INTO users (username, password_hash, display_name, untis_username, untis_password_enc, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (username, generate_password_hash(password), display_name, untis_username, enc_pw, dt.datetime.now(TZ).isoformat()),
+        (username, generate_password_hash(password), display_name, untis_username if has_untis else "", enc_pw, dt.datetime.now(TZ).isoformat()),
     )
     user_id = cur.lastrowid
     conn.commit()
@@ -679,11 +689,7 @@ def admin_authorized():
     return session.get("is_admin") is True
 
 
-@app.route("/admin")
-def admin_dashboard():
-    if not admin_authorized():
-        return render_template("admin_login.html", error=None)
-
+def get_users_overview():
     conn = get_db()
     users = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
     rows = []
@@ -697,7 +703,21 @@ def admin_dashboard():
             "tasks": tasks_c, "grades": grades_c, "push": push_c,
         })
     conn.close()
-    return render_template("admin.html", users=rows)
+    return rows
+
+
+@app.route("/admin")
+def admin_dashboard():
+    if not admin_authorized():
+        return render_template("admin_login.html", error=None)
+    return render_template("admin.html")
+
+
+@app.route("/admin/users")
+def admin_users_json():
+    if not admin_authorized():
+        return jsonify({"error": "unauthorized"}), 403
+    return jsonify(get_users_overview())
 
 
 @app.route("/admin/login", methods=["POST"])
@@ -760,6 +780,8 @@ def admin_check(user_id):
     conn.close()
     if not row:
         return jsonify({"ok": False, "error": "Nutzer nicht gefunden."})
+    if not row["untis_username"]:
+        return jsonify({"ok": False, "error": "Kein WebUntis verknüpft."})
     pw = decrypt_untis_password(row["untis_password_enc"])
     ok, err = try_untis_login(row["untis_username"], pw)
     return jsonify({"ok": ok, "error": err})

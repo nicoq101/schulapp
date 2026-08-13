@@ -6,6 +6,7 @@
 <style>
   body { font-family: -apple-system, sans-serif; background: #0A0A0B; color: #F5F5F5; padding: 24px; }
   h1 { font-size: 20px; }
+  h2 { font-size: 15px; margin-top: 28px; }
   table { width: 100%; border-collapse: collapse; margin-top: 16px; }
   th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 13px; }
   th { color: #8A8D93; text-transform: uppercase; font-size: 11px; }
@@ -14,48 +15,66 @@
   .status { font-weight: 600; }
   .ok { color: #7CF5A0; }
   .fail { color: #FF8080; }
+  .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#7CF5A0; margin-right:6px; animation: blink 1.6s infinite; }
+  @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
 </style>
 </head>
 <body>
-  <h1>👥 Nutzer ({{ users|length }}) <button onclick="logout()" style="float:right;">Abmelden</button></h1>
+  <h1><span class="live-dot"></span>Nutzer (<span id="user-count">…</span>) <button onclick="logout()" style="float:right;">Abmelden</button></h1>
 
-  <h2 style="font-size:15px; margin-top:28px;">🔒 Gesperrte IPs</h2>
-  <table id="lockout-table">
+  <h2>🔒 Gesperrte IPs</h2>
+  <table>
     <thead><tr><th>IP</th><th>Bereich</th><th>Fehlversuche</th><th>Letzter Versuch</th><th></th></tr></thead>
     <tbody id="lockout-body"><tr><td colspan="5">Lädt …</td></tr></tbody>
   </table>
+
+  <h2>👥 Accounts</h2>
   <table>
     <thead>
-      <tr>
-        <th>Login</th><th>Name</th><th>WebUntis-User</th><th>Aufgaben</th><th>Noten</th><th>Push</th><th>Seit</th><th>WebUntis-Status</th><th></th>
-      </tr>
+      <tr><th>Login</th><th>Name</th><th>WebUntis-User</th><th>Aufgaben</th><th>Noten</th><th>Push</th><th>Seit</th><th>WebUntis-Status</th><th></th></tr>
     </thead>
-    <tbody>
-      {% for u in users %}
-      <tr id="row-{{ u.id }}">
-        <td>{{ u.username }}</td>
-        <td>{{ u.display_name }}</td>
-        <td>{{ u.untis_username }}</td>
-        <td>{{ u.tasks }}</td>
-        <td>{{ u.grades }}</td>
-        <td>{{ u.push }}</td>
-        <td>{{ u.created_at[:10] }}</td>
-        <td class="status" id="status-{{ u.id }}">–</td>
-        <td>
-          <button onclick="check({{ u.id }})">WebUntis prüfen</button>
-          <button onclick="del({{ u.id }}, '{{ u.username }}')">Löschen</button>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
+    <tbody id="users-body"><tr><td colspan="9">Lädt …</td></tr></tbody>
   </table>
 
 <script>
+const REFRESH_MS = 10000;
+let statusCache = {}; // id -> letzter geprüfter Status (bleibt beim Neurendern erhalten)
+
+async function loadUsers() {
+  const res = await fetch("/admin/users");
+  if (res.status === 403) { location.reload(); return; }
+  const users = await res.json();
+  document.getElementById("user-count").textContent = users.length;
+
+  const body = document.getElementById("users-body");
+  if (users.length === 0) {
+    body.innerHTML = `<tr><td colspan="9">Noch keine Accounts.</td></tr>`;
+    return;
+  }
+  body.innerHTML = users.map((u) => {
+    const cached = statusCache[u.id];
+    const statusText = u.untis_username
+      ? (cached ? (cached.ok ? "✅ funktioniert" : "❌ " + cached.error) : "–")
+      : "– kein WebUntis";
+    const statusClass = cached ? (cached.ok ? "ok" : "fail") : "";
+    return `<tr id="row-${u.id}">
+      <td>${u.username}</td><td>${u.display_name}</td><td>${u.untis_username || "–"}</td>
+      <td>${u.tasks}</td><td>${u.grades}</td><td>${u.push}</td><td>${u.created_at.slice(0,10)}</td>
+      <td class="status ${statusClass}" id="status-${u.id}">${statusText}</td>
+      <td>
+        <button onclick="check(${u.id})">WebUntis prüfen</button>
+        <button onclick="del(${u.id}, '${u.username}')">Löschen</button>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
 async function check(id) {
   const el = document.getElementById("status-" + id);
   el.textContent = "prüfe …";
   const res = await fetch(`/admin/check/${id}`);
   const data = await res.json();
+  statusCache[id] = data;
   el.textContent = data.ok ? "✅ funktioniert" : "❌ " + (data.error || "Fehler");
   el.className = "status " + (data.ok ? "ok" : "fail");
 }
@@ -63,12 +82,8 @@ async function check(id) {
 async function del(id, name) {
   if (!confirm(`Account "${name}" wirklich komplett löschen?`)) return;
   await fetch(`/admin/delete/${id}`, { method: "POST" });
-  document.getElementById("row-" + id).remove();
-}
-
-async function logout() {
-  await fetch("/admin/logout", { method: "POST" });
-  location.reload();
+  delete statusCache[id];
+  loadUsers();
 }
 
 async function loadLockouts() {
@@ -79,14 +94,10 @@ async function loadLockouts() {
     body.innerHTML = `<tr><td colspan="5">Aktuell keine gesperrten IPs.</td></tr>`;
     return;
   }
-  body.innerHTML = data
-    .map(
-      (l) => `<tr>
-        <td>${l.ip}</td><td>${l.scope}</td><td>${l.c}</td><td>${l.last.slice(0, 16).replace("T", " ")}</td>
-        <td><button onclick="unlock('${l.ip}', '${l.scope}')">Entsperren</button></td>
-      </tr>`
-    )
-    .join("");
+  body.innerHTML = data.map((l) => `<tr>
+    <td>${l.ip}</td><td>${l.scope}</td><td>${l.c}</td><td>${l.last.slice(0,16).replace("T"," ")}</td>
+    <td><button onclick="unlock('${l.ip}', '${l.scope}')">Entsperren</button></td>
+  </tr>`).join("");
 }
 
 async function unlock(ip, scope) {
@@ -98,7 +109,15 @@ async function unlock(ip, scope) {
   loadLockouts();
 }
 
+async function logout() {
+  await fetch("/admin/logout", { method: "POST" });
+  location.reload();
+}
+
+loadUsers();
 loadLockouts();
+setInterval(loadUsers, REFRESH_MS);
+setInterval(loadLockouts, REFRESH_MS);
 </script>
 </body>
 </html>

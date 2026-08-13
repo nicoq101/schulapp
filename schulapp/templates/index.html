@@ -38,13 +38,19 @@
         <label>Anzeigename</label>
         <input type="text" id="auth-display-name" placeholder="z.B. Nico" />
       </div>
-      <div class="field">
-        <label>WebUntis-Benutzername</label>
-        <input type="text" id="auth-untis-username" placeholder="Dein WebUntis-Login" />
+      <div class="settings-row" style="padding: 6px 0;">
+        <div class="label">WebUntis verknüpfen (optional)</div>
+        <button class="switch" id="untis-toggle"></button>
       </div>
-      <div class="field">
-        <label>WebUntis-Passwort</label>
-        <input type="password" id="auth-untis-password" placeholder="Dein WebUntis-Passwort" />
+      <div id="untis-fields" style="display:none;">
+        <div class="field">
+          <label>WebUntis-Benutzername</label>
+          <input type="text" id="auth-untis-username" placeholder="Dein WebUntis-Login" />
+        </div>
+        <div class="field">
+          <label>WebUntis-Passwort</label>
+          <input type="password" id="auth-untis-password" placeholder="Dein WebUntis-Passwort" />
+        </div>
       </div>
     </div>
 

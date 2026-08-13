@@ -593,6 +593,13 @@ document.querySelectorAll("#auth-mode button").forEach((btn) => {
   });
 });
 
+document.getElementById("untis-toggle").addEventListener("click", () => {
+  const sw = document.getElementById("untis-toggle");
+  const on = !sw.classList.contains("on");
+  sw.classList.toggle("on", on);
+  document.getElementById("untis-fields").style.display = on ? "block" : "none";
+});
+
 document.getElementById("auth-submit").addEventListener("click", async () => {
   const errorBox = document.getElementById("auth-error");
   errorBox.classList.remove("visible");
@@ -603,8 +610,10 @@ document.getElementById("auth-submit").addEventListener("click", async () => {
   };
   if (authMode === "register") {
     body.display_name = document.getElementById("auth-display-name").value.trim();
-    body.untis_username = document.getElementById("auth-untis-username").value.trim();
-    body.untis_password = document.getElementById("auth-untis-password").value;
+    if (document.getElementById("untis-toggle").classList.contains("on")) {
+      body.untis_username = document.getElementById("auth-untis-username").value.trim();
+      body.untis_password = document.getElementById("auth-untis-password").value;
+    }
   }
 
   const res = await api(authMode === "register" ? "/api/register" : "/api/login", {
