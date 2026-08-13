@@ -42,6 +42,7 @@ function weekdayName(iso) {
 async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...options,
   });
   return res.json();
@@ -62,14 +63,15 @@ document.querySelectorAll(".tab").forEach((tab) => {
 // ==================== Daten laden ====================
 
 async function loadAll() {
-  const [timetable, exams, tasks, settings, notifications] = await Promise.all([
+  const [timetable, exams, tasks, settings, notifications, grades] = await Promise.all([
     api("/api/timetable"),
     api("/api/exams"),
     api("/api/tasks"),
     api("/api/settings"),
     api("/api/notifications"),
+    api("/api/grades"),
   ]);
-  state = { timetable, exams, tasks, settings, notifications };
+  state = { timetable, exams, tasks, settings, notifications, grades };
   renderAll();
 }
 
@@ -81,6 +83,7 @@ function renderAll() {
   renderPlan();
   renderEinstellungen();
   renderNotifications();
+  renderNoten(state.grades || []);
 }
 
 // ==================== Begrüßung ====================
@@ -459,25 +462,33 @@ document.querySelectorAll(".type-toggle button").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".type-toggle button").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
-    newTaskTyp = btn.dataset.typ;
+    switchTaskType(btn.dataset.typ);
   });
 });
 
 document.getElementById("save-task-btn").addEventListener("click", async () => {
-  const fach = document.getElementById("new-fach").value.trim();
-  const text = document.getElementById("new-text").value.trim();
-  const faellig = document.getElementById("new-faellig").value || null;
+  if (newTaskTyp === "note") {
+    const fach = document.getElementById("new-fach").value.trim();
+    const note = document.getElementById("new-note").value;
+    const gewichtung = document.getElementById("new-gewichtung").value || 1;
+    const art = document.getElementById("new-art").value.trim();
+    if (!fach || !note) return;
 
-  if (!fach || !text) return;
+    await api("/api/grades", { method: "POST", body: JSON.stringify({ fach, note, gewichtung, art }) });
+    document.getElementById("new-note").value = "";
+    document.getElementById("new-art").value = "";
+  } else {
+    const fach = document.getElementById("new-fach").value.trim();
+    const text = document.getElementById("new-text").value.trim();
+    const faellig = document.getElementById("new-faellig").value || null;
+    if (!fach || !text) return;
 
-  await api("/api/tasks", {
-    method: "POST",
-    body: JSON.stringify({ typ: newTaskTyp, fach, text, faellig }),
-  });
+    await api("/api/tasks", { method: "POST", body: JSON.stringify({ typ: newTaskTyp, fach, text, faellig }) });
+    document.getElementById("new-text").value = "";
+    document.getElementById("new-faellig").value = "";
+  }
 
   document.getElementById("new-fach").value = "";
-  document.getElementById("new-text").value = "";
-  document.getElementById("new-faellig").value = "";
   closeAddSheet();
   await loadAll();
 });
@@ -542,8 +553,145 @@ document.getElementById("test-push-btn").addEventListener("click", async () => {
   setTimeout(() => (btn.textContent = "Testnachricht senden"), 3000);
 });
 
+// ==================== Auth ====================
+
+let authMode = "login";
+
+document.querySelectorAll("#auth-mode button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#auth-mode button").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    authMode = btn.dataset.mode;
+    document.getElementById("register-fields").style.display = authMode === "register" ? "block" : "none";
+    document.getElementById("auth-submit").textContent = authMode === "register" ? "Account erstellen" : "Anmelden";
+  });
+});
+
+document.getElementById("auth-submit").addEventListener("click", async () => {
+  const errorBox = document.getElementById("auth-error");
+  errorBox.classList.remove("visible");
+
+  const body = {
+    username: document.getElementById("auth-username").value.trim(),
+    password: document.getElementById("auth-password").value,
+  };
+  if (authMode === "register") {
+    body.display_name = document.getElementById("auth-display-name").value.trim();
+    body.untis_username = document.getElementById("auth-untis-username").value.trim();
+    body.untis_password = document.getElementById("auth-untis-password").value;
+  }
+
+  const res = await api(authMode === "register" ? "/api/register" : "/api/login", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    errorBox.textContent = res.error || "Etwas ist schiefgelaufen.";
+    errorBox.classList.add("visible");
+    return;
+  }
+
+  showApp();
+  await loadAll();
+  setupPush();
+});
+
+document.getElementById("logout-btn").addEventListener("click", async () => {
+  await api("/api/logout", { method: "POST" });
+  document.getElementById("app").classList.remove("visible");
+  document.getElementById("auth-screen").classList.remove("hidden");
+});
+
+function showApp() {
+  document.getElementById("auth-screen").classList.add("hidden");
+  document.getElementById("app").classList.add("visible");
+}
+
+async function checkAuth() {
+  const me = await api("/api/me");
+  if (me.authenticated) {
+    showApp();
+    await loadAll();
+    setupPush();
+  }
+}
+
+// ==================== Noten-Tracker ====================
+
+function switchTaskType(typ) {
+  newTaskTyp = typ;
+  const isNote = typ === "note";
+  document.getElementById("field-fach").style.display = "block";
+  document.getElementById("field-text").style.display = isNote ? "none" : "block";
+  document.getElementById("field-faellig").style.display = isNote ? "none" : "block";
+  document.getElementById("field-note").style.display = isNote ? "block" : "none";
+  document.getElementById("field-gewichtung").style.display = isNote ? "block" : "none";
+  document.getElementById("field-art").style.display = isNote ? "block" : "none";
+}
+
+function renderNoten(grades) {
+  const bySubject = {};
+  for (const g of grades) (bySubject[g.fach] ||= []).push(g);
+
+  let totalWeighted = 0, totalWeight = 0;
+  for (const g of grades) {
+    totalWeighted += g.note * g.gewichtung;
+    totalWeight += g.gewichtung;
+  }
+  document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(2) : "–";
+  document.getElementById("tile-anzahl-noten").textContent = grades.length;
+
+  const bySubjectEl = document.getElementById("grades-by-subject");
+  const subjects = Object.keys(bySubject).sort();
+  if (subjects.length === 0) {
+    bySubjectEl.innerHTML = `<div class="empty-state">Noch keine Noten erfasst.</div>`;
+  } else {
+    bySubjectEl.innerHTML = subjects
+      .map((fach) => {
+        const list = bySubject[fach];
+        const w = list.reduce((s, g) => s + g.note * g.gewichtung, 0);
+        const wSum = list.reduce((s, g) => s + g.gewichtung, 0);
+        const schnitt = (w / wSum).toFixed(2);
+        return `<div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
+          <div><div class="task-fach">${escapeHtml(fach)}</div><div class="task-text">${list.length} Note${list.length !== 1 ? "n" : ""}</div></div>
+          <div class="value mono" style="font-size:20px;">${schnitt}</div>
+        </div>`;
+      })
+      .join("");
+  }
+
+  const listEl = document.getElementById("grades-list");
+  if (grades.length === 0) {
+    listEl.innerHTML = `<div class="empty-state">Über den "+"-Button eine Note hinzufügen.</div>`;
+  } else {
+    listEl.innerHTML = grades
+      .map(
+        (g) => `
+        <div class="task-row" data-id="${g.id}">
+          <div style="flex:1;">
+            <div class="task-fach">${escapeHtml(g.fach)}${g.art ? " · " + escapeHtml(g.art) : ""}</div>
+            <div class="task-text">${g.beschreibung ? escapeHtml(g.beschreibung) : fmtDate(g.datum)}</div>
+            <div class="task-due later">Gewichtung ${g.gewichtung}x</div>
+          </div>
+          <div class="value mono" style="font-size:20px;">${g.note}</div>
+          <button class="icon-btn" data-action="delete-grade" style="width:32px;height:32px;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>`
+      )
+      .join("");
+    listEl.querySelectorAll('[data-action="delete-grade"]').forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.closest(".task-row").dataset.id;
+        await api(`/api/grades/${id}`, { method: "DELETE" });
+        await loadAll();
+      });
+    });
+  }
+}
+
 // ==================== Start ====================
 
-loadAll();
-setupPush();
-setInterval(loadAll, 5 * 60 * 1000); // alle 5 Minuten aktualisieren
+checkAuth();
+setInterval(() => { if (document.getElementById("app").classList.contains("visible")) loadAll(); }, 5 * 60 * 1000);

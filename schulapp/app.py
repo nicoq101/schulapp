@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Schulapp - Backend
+Schulapp - Backend (Multi-User)
 
 Eine kleine Flask-App, die:
-  - den WebUntis-Stundenplan überwacht und bei Änderungen Push-Benachrichtigungen schickt
-  - Hausaufgaben & Klausuren verwaltet (REST-API)
-  - dreimal täglich (einstellbar) an offene Aufgaben erinnert
+  - mehreren Nutzern eigene Accounts mit eigenem WebUntis-Zugang bietet
+  - pro Nutzer den Stundenplan überwacht und bei Änderungen Push-Benachrichtigungen schickt
+  - Hausaufgaben, Klausuren & Noten verwaltet (REST-API, pro Nutzer getrennt)
+  - mehrmals täglich (einstellbar) an offene Aufgaben erinnert
   - die PWA (index.html + Assets) ausliefert
 
 Einrichtung: siehe README.md im selben Ordner.
@@ -16,11 +17,14 @@ import json
 import sqlite3
 import datetime as dt
 from pathlib import Path
+from functools import wraps
 from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request, send_from_directory, render_template
+from flask import Flask, jsonify, request, send_from_directory, render_template, session
+from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 from pywebpush import webpush, WebPushException
+from cryptography.fernet import Fernet
 import webuntis
 
 BASE_DIR = Path(__file__).parent
@@ -31,14 +35,25 @@ TZ = ZoneInfo("Europe/Berlin")
 
 UNTIS_SCHOOL = os.environ.get("UNTIS_SCHOOL", "csgb")
 UNTIS_SERVER = os.environ.get("UNTIS_SERVER", "csgb.webuntis.com")
-UNTIS_USERNAME = os.environ.get("UNTIS_USERNAME", "")
-UNTIS_PASSWORD = os.environ.get("UNTIS_PASSWORD", "")
+
+# Nur für die automatische Migration deines bisherigen Einzel-Accounts (siehe migrate_legacy_user)
+LEGACY_UNTIS_USERNAME = os.environ.get("UNTIS_USERNAME", "")
+LEGACY_UNTIS_PASSWORD = os.environ.get("UNTIS_PASSWORD", "")
 
 VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:test@example.com")
 
+SECRET_KEY = os.environ.get("SECRET_KEY", "bitte-in-render-setzen-dev-only")
+ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
+fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+
 app = Flask(__name__, static_folder="static", template_folder="templates")
+app.secret_key = SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=True,
+)
 
 # ==================== Datenbank ====================
 
@@ -49,77 +64,185 @@ def get_db():
     return conn
 
 
+def column_exists(conn, table, column):
+    cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    return column in cols
+
+
 def init_db():
     conn = get_db()
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            display_name TEXT,
+            klasse TEXT,
+            untis_username TEXT NOT NULL,
+            untis_password_enc TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             typ TEXT NOT NULL,              -- 'hausaufgabe' oder 'pruefung'
             fach TEXT NOT NULL,
             text TEXT NOT NULL,
-            faellig TEXT,                   -- ISO-Datum oder NULL
+            faellig TEXT,
             erledigt INTEGER NOT NULL DEFAULT 0,
             erstellt TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (user_id, key)
         );
 
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             endpoint TEXT UNIQUE NOT NULL,
             data TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS timetable_snapshot (
-            key TEXT PRIMARY KEY,
+            user_id INTEGER PRIMARY KEY,
             data TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS notifications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
             titel TEXT NOT NULL,
             text TEXT NOT NULL,
             typ TEXT NOT NULL,
             gelesen INTEGER NOT NULL DEFAULT 0,
             erstellt TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS grades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            fach TEXT NOT NULL,
+            note REAL NOT NULL,
+            gewichtung REAL NOT NULL DEFAULT 1,
+            art TEXT,                        -- z.B. 'schriftlich', 'mündlich'
+            beschreibung TEXT,
+            datum TEXT,
+            erstellt TEXT NOT NULL
+        );
         """
     )
     conn.commit()
 
-    defaults = {
-        "notify_stundenplan": "true",
-        "notify_lernen": "true",
-        "notify_pruefungen": "true",
-        "reminder_times": json.dumps(["17:30", "19:00", "21:30"]),
-        "theme": "system",
-        "name": "Nico",
-        "klasse": "",
-    }
-    for k, v in defaults.items():
-        conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-    conn.commit()
+    # --- Migration: falls eine ältere Version dieser App (ohne Login) schon
+    # Daten angelegt hat, diese automatisch dem ersten Nutzer zuordnen. ---
+    migrate_legacy_data(conn)
+
     conn.close()
 
 
-def get_setting(key, default=None):
+def migrate_legacy_data(conn):
+    """Ordnet Daten aus der Einzel-Nutzer-Version einem echten Account zu,
+    damit beim Umstieg auf Accounts nichts verloren geht."""
+    has_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+    if has_users > 0:
+        return  # schon migriert oder gar keine alten Daten
+
+    has_old_tasks = conn.execute(
+        "SELECT COUNT(*) c FROM tasks WHERE user_id IS NULL"
+    ).fetchone()["c"] if column_exists(conn, "tasks", "user_id") else 0
+
+    if not LEGACY_UNTIS_USERNAME:
+        return  # nichts zu migrieren / kein Alt-Account bekannt
+
+    enc_pw = fernet.encrypt(LEGACY_UNTIS_PASSWORD.encode()).decode() if fernet else LEGACY_UNTIS_PASSWORD
+    cur = conn.execute(
+        "INSERT INTO users (username, password_hash, display_name, untis_username, untis_password_enc, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            LEGACY_UNTIS_USERNAME,
+            generate_password_hash("bitte-aendern"),
+            "Nico",
+            LEGACY_UNTIS_USERNAME,
+            enc_pw,
+            dt.datetime.now(TZ).isoformat(),
+        ),
+    )
+    legacy_user_id = cur.lastrowid
+
+    for table in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot"):
+        conn.execute(f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL", (legacy_user_id,))
+
+    conn.commit()
+    print(
+        f"Alt-Daten migriert zu Account '{LEGACY_UNTIS_USERNAME}'. "
+        f"Vorläufiges Passwort: 'bitte-aendern' - bitte gleich nach dem ersten Login ändern!"
+    )
+
+
+# ==================== Auth-Hilfsfunktionen ====================
+
+
+def login_required(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "not_authenticated"}), 401
+        return f(*args, **kwargs)
+
+    return wrapper
+
+
+def current_user():
     conn = get_db()
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (session["user_id"],)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def decrypt_untis_password(enc):
+    if fernet is None:
+        return enc
+    return fernet.decrypt(enc.encode()).decode()
+
+
+def get_setting(user_id, key, default=None):
+    conn = get_db()
+    row = conn.execute("SELECT value FROM settings WHERE user_id = ? AND key = ?", (user_id, key)).fetchone()
     conn.close()
     return row["value"] if row else default
 
 
-def set_setting(key, value):
+def set_setting(user_id, key, value):
     conn = get_db()
     conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (key, value),
+        "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+        (user_id, key, value),
     )
+    conn.commit()
+    conn.close()
+
+
+DEFAULT_SETTINGS = {
+    "notify_stundenplan": "true",
+    "notify_lernen": "true",
+    "notify_pruefungen": "true",
+    "reminder_times": json.dumps(["17:30", "19:00", "21:30"]),
+    "theme": "system",
+    "klasse": "",
+}
+
+
+def ensure_default_settings(user_id):
+    conn = get_db()
+    for k, v in DEFAULT_SETTINGS.items():
+        conn.execute("INSERT OR IGNORE INTO settings (user_id, key, value) VALUES (?, ?, ?)", (user_id, k, v))
     conn.commit()
     conn.close()
 
@@ -127,35 +250,34 @@ def set_setting(key, value):
 # ==================== WebUntis ====================
 
 
-def untis_login():
+def untis_login(user):
     return webuntis.Session(
         server=UNTIS_SERVER,
-        username=UNTIS_USERNAME,
-        password=UNTIS_PASSWORD,
+        username=user["untis_username"],
+        password=decrypt_untis_password(user["untis_password_enc"]),
         school=UNTIS_SCHOOL,
-        useragent="Schulapp/1.0",
+        useragent="Schulapp/2.0",
     ).login()
 
 
-def fetch_timetable_days(days_ahead=5):
-    """Holt den Stundenplan, gruppiert nach Tag. Gibt [] zurück falls nicht verfügbar."""
+def fetch_timetable_days(user, days_ahead=5):
     try:
-        session = untis_login()
+        session_ = untis_login(user)
     except Exception as e:
-        print(f"WebUntis-Login fehlgeschlagen: {e}")
+        print(f"WebUntis-Login fehlgeschlagen ({user['username']}): {e}")
         return []
 
     start = dt.date.today()
     end = start + dt.timedelta(days=days_ahead)
 
     try:
-        table = session.my_timetable(start=start, end=end)
+        table = session_.my_timetable(start=start, end=end)
     except webuntis.errors.DateNotAllowed:
-        session.logout()
+        session_.logout()
         return []
     except Exception as e:
-        print(f"Stundenplan-Abruf fehlgeschlagen: {e}")
-        session.logout()
+        print(f"Stundenplan-Abruf fehlgeschlagen ({user['username']}): {e}")
+        session_.logout()
         return []
 
     result = []
@@ -172,17 +294,17 @@ def fetch_timetable_days(days_ahead=5):
                 "info": p.text or "",
             }
         )
-    session.logout()
+    session_.logout()
     return result
 
 
-def fetch_exams(days_ahead=90):
+def fetch_exams(user, days_ahead=90):
     try:
-        session = untis_login()
-        exams = session.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=days_ahead))
-        session.logout()
+        session_ = untis_login(user)
+        exams = session_.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=days_ahead))
+        session_.logout()
     except Exception as e:
-        print(f"Klausuren-Abruf fehlgeschlagen: {e}")
+        print(f"Klausuren-Abruf fehlgeschlagen ({user['username']}): {e}")
         return []
 
     result = []
@@ -204,7 +326,6 @@ def entry_key(entry):
 def diff_timetable(old_entries, new_entries):
     old_map = {entry_key(e): e for e in old_entries}
     new_map = {entry_key(e): e for e in new_entries}
-
     added = [new_map[k] for k in new_map if k not in old_map]
     removed = [old_map[k] for k in old_map if k not in new_map]
     changed = [(old_map[k], new_map[k]) for k in new_map if k in old_map and old_map[k] != new_map[k]]
@@ -212,7 +333,6 @@ def diff_timetable(old_entries, new_entries):
 
 
 def describe_change(old, new):
-    """Baut einen konkreten, lesbaren Satz für eine erkannte Änderung."""
     if new["code"] == "cancelled" and old["code"] != "cancelled":
         return f"{new['subject']} um {new['start']} Uhr fällt heute aus."
     if old["start"] != new["start"]:
@@ -229,13 +349,13 @@ def describe_change(old, new):
 # ==================== Push-Benachrichtigungen ====================
 
 
-def send_push(title, body, tag="allgemein"):
+def send_push(user_id, title, body, tag="allgemein"):
     if not VAPID_PRIVATE_KEY:
         print(f"[Push nicht konfiguriert] {title}: {body}")
         return
 
     conn = get_db()
-    subs = conn.execute("SELECT endpoint, data FROM subscriptions").fetchall()
+    subs = conn.execute("SELECT endpoint, data FROM subscriptions WHERE user_id = ?", (user_id,)).fetchall()
     conn.close()
 
     payload = json.dumps({"title": title, "body": body, "tag": tag})
@@ -258,107 +378,114 @@ def send_push(title, body, tag="allgemein"):
                 conn.close()
 
 
-def log_notification(titel, text, typ):
+def log_notification(user_id, titel, text, typ):
     conn = get_db()
     conn.execute(
-        "INSERT INTO notifications (titel, text, typ, erstellt) VALUES (?, ?, ?, ?)",
-        (titel, text, typ, dt.datetime.now(TZ).isoformat()),
+        "INSERT INTO notifications (user_id, titel, text, typ, erstellt) VALUES (?, ?, ?, ?, ?)",
+        (user_id, titel, text, typ, dt.datetime.now(TZ).isoformat()),
     )
     conn.commit()
     conn.close()
 
 
-# ==================== Scheduler-Jobs ====================
+# ==================== Scheduler-Jobs (laufen für ALLE Nutzer) ====================
+
+
+def all_users():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM users").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def job_check_timetable():
-    if get_setting("notify_stundenplan") != "true":
-        return
+    for user in all_users():
+        uid = user["id"]
+        if get_setting(uid, "notify_stundenplan") != "true":
+            continue
 
-    new_entries = fetch_timetable_days()
-    if not new_entries:
-        return
+        new_entries = fetch_timetable_days(user)
+        if not new_entries:
+            continue
 
-    conn = get_db()
-    row = conn.execute("SELECT data FROM timetable_snapshot WHERE key = 'current'").fetchone()
-    old_entries = json.loads(row["data"]) if row else []
+        conn = get_db()
+        row = conn.execute("SELECT data FROM timetable_snapshot WHERE user_id = ?", (uid,)).fetchone()
+        old_entries = json.loads(row["data"]) if row else []
 
-    if old_entries:
-        added, removed, changed = diff_timetable(old_entries, new_entries)
+        if old_entries:
+            added, removed, changed = diff_timetable(old_entries, new_entries)
 
-        for old, new in changed:
-            text = describe_change(old, new)
-            title = "⚠️ Unterricht fällt aus" if new["code"] == "cancelled" else "🔔 Stundenplan geändert"
-            send_push(title, text, tag="stundenplan")
-            log_notification(title, text, "stundenplan")
+            for old, new in changed:
+                text = describe_change(old, new)
+                title = "⚠️ Unterricht fällt aus" if new["code"] == "cancelled" else "🔔 Stundenplan geändert"
+                send_push(uid, title, text, tag="stundenplan")
+                log_notification(uid, title, text, "stundenplan")
 
-        for e in added:
-            text = f"Neu im Plan: {e['subject']} am {e['date']} um {e['start']} Uhr."
-            send_push("🔔 Stundenplan geändert", text, tag="stundenplan")
-            log_notification("🔔 Stundenplan geändert", text, "stundenplan")
+            for e in added:
+                text = f"Neu im Plan: {e['subject']} am {e['date']} um {e['start']} Uhr."
+                send_push(uid, "🔔 Stundenplan geändert", text, tag="stundenplan")
+                log_notification(uid, "🔔 Stundenplan geändert", text, "stundenplan")
 
-    conn.execute(
-        "INSERT INTO timetable_snapshot (key, data) VALUES ('current', ?) "
-        "ON CONFLICT(key) DO UPDATE SET data = excluded.data",
-        (json.dumps(new_entries),),
-    )
-    conn.commit()
-    conn.close()
+        conn.execute(
+            "INSERT INTO timetable_snapshot (user_id, data) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET data = excluded.data",
+            (uid, json.dumps(new_entries)),
+        )
+        conn.commit()
+        conn.close()
 
 
 def job_reminder():
-    """Wird zu jeder in reminder_times eingetragenen Uhrzeit aufgerufen."""
-    if get_setting("notify_lernen") != "true":
-        return
+    for user in all_users():
+        uid = user["id"]
+        if get_setting(uid, "notify_lernen") != "true":
+            continue
 
-    conn = get_db()
-    open_tasks = conn.execute(
-        "SELECT fach, faellig FROM tasks WHERE typ = 'hausaufgabe' AND erledigt = 0"
-    ).fetchall()
-    conn.close()
+        conn = get_db()
+        open_tasks = conn.execute(
+            "SELECT fach FROM tasks WHERE user_id = ? AND typ = 'hausaufgabe' AND erledigt = 0", (uid,)
+        ).fetchall()
+        conn.close()
 
-    if not open_tasks:
-        title = "🌙 Kurzer Check"
-        body = "Aktuell stehen keine offenen Hausaufgaben in der App. Trotzdem alles vorbereitet für morgen?"
-    else:
-        faecher = sorted({t["fach"] for t in open_tasks})
-        anzahl = len(open_tasks)
-        if anzahl == 1:
-            title = "📚 Noch 1 Aufgabe offen"
+        if not open_tasks:
+            title = "🌙 Kurzer Check"
+            body = "Aktuell stehen keine offenen Hausaufgaben in der App. Trotzdem alles vorbereitet für morgen?"
         else:
-            title = f"📚 Noch {anzahl} Aufgaben offen"
-        body = f"Du hast noch {', '.join(faecher)} offen. Willst du jetzt kurz Zeit dafür einplanen?"
+            faecher = sorted({t["fach"] for t in open_tasks})
+            anzahl = len(open_tasks)
+            title = "📚 Noch 1 Aufgabe offen" if anzahl == 1 else f"📚 Noch {anzahl} Aufgaben offen"
+            body = f"Du hast noch {', '.join(faecher)} offen. Willst du jetzt kurz Zeit dafür einplanen?"
 
-    send_push(title, body, tag="lernen")
-    log_notification(title, body, "lernen")
+        send_push(uid, title, body, tag="lernen")
+        log_notification(uid, title, body, "lernen")
 
 
 def job_exam_countdown():
-    """Läuft einmal täglich morgens - kündigt Klausuren in den nächsten Tagen an."""
-    if get_setting("notify_pruefungen") != "true":
-        return
-
     today = dt.date.today()
+    for user in all_users():
+        uid = user["id"]
+        if get_setting(uid, "notify_pruefungen") != "true":
+            continue
 
-    # Automatisch von WebUntis (falls die Schule den Zugriff erlaubt)
-    exams = [{"name": e["name"], "date": e["date"]} for e in fetch_exams()]
+        exams = [{"name": e["name"], "date": e["date"]} for e in fetch_exams(user)]
 
-    # Manuell in der App eingetragene Klausuren
-    conn = get_db()
-    manual = conn.execute(
-        "SELECT fach, text, faellig FROM tasks WHERE typ = 'pruefung' AND faellig IS NOT NULL AND erledigt = 0"
-    ).fetchall()
-    conn.close()
-    exams += [{"name": f"{m['fach']}: {m['text']}", "date": m["faellig"]} for m in manual]
+        conn = get_db()
+        manual = conn.execute(
+            "SELECT fach, text, faellig FROM tasks WHERE user_id = ? AND typ = 'pruefung' "
+            "AND faellig IS NOT NULL AND erledigt = 0",
+            (uid,),
+        ).fetchall()
+        conn.close()
+        exams += [{"name": f"{m['fach']}: {m['text']}", "date": m["faellig"]} for m in manual]
 
-    for e in exams:
-        exam_date = dt.date.fromisoformat(e["date"])
-        days_left = (exam_date - today).days
-        if days_left in (7, 3, 1):
-            title = f"📅 {e['name']} in {days_left} Tag{'en' if days_left != 1 else ''}"
-            body = f"Am {exam_date.strftime('%d.%m.')}."
-            send_push(title, body, tag="pruefung")
-            log_notification(title, body, "pruefung")
+        for e in exams:
+            exam_date = dt.date.fromisoformat(e["date"])
+            days_left = (exam_date - today).days
+            if days_left in (7, 3, 1):
+                title = f"📅 {e['name']} in {days_left} Tag{'en' if days_left != 1 else ''}"
+                body = f"Am {exam_date.strftime('%d.%m.')}."
+                send_push(uid, title, body, tag="pruefung")
+                log_notification(uid, title, body, "pruefung")
 
 
 scheduler = BackgroundScheduler(timezone=TZ)
@@ -367,55 +494,100 @@ scheduler = BackgroundScheduler(timezone=TZ)
 def setup_scheduler():
     scheduler.add_job(job_check_timetable, "interval", minutes=15, id="timetable_check")
     scheduler.add_job(job_exam_countdown, "cron", hour=7, minute=0, id="exam_countdown")
-
-    times = json.loads(get_setting("reminder_times", "[]"))
-    reschedule_reminders(times)
-
+    reschedule_all_reminders()
     scheduler.start()
 
 
-def reschedule_reminders(times):
+def reschedule_all_reminders():
+    """Sammelt alle einzigartigen Erinnerungszeiten über alle Nutzer hinweg.
+    (job_reminder selbst filtert dann pro Nutzer nach dessen eigenen Einstellungen.)"""
     for job in scheduler.get_jobs():
         if job.id.startswith("reminder_"):
             scheduler.remove_job(job.id)
 
-    for i, t in enumerate(times):
+    all_times = set()
+    for user in all_users():
+        times = json.loads(get_setting(user["id"], "reminder_times", "[]"))
+        all_times.update(times)
+
+    for i, t in enumerate(sorted(all_times)):
         hour, minute = map(int, t.split(":"))
         scheduler.add_job(job_reminder, "cron", hour=hour, minute=minute, id=f"reminder_{i}")
 
 
-# ==================== API-Routen ====================
+# ==================== Auth-Routen ====================
 
 
-@app.route("/api/test-push", methods=["POST"])
-def api_test_push():
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    data = request.get_json()
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    display_name = data.get("display_name", "").strip() or username
+    untis_username = data.get("untis_username", "").strip()
+    untis_password = data.get("untis_password", "")
+
+    if not username or not password or not untis_username or not untis_password:
+        return jsonify({"ok": False, "error": "Bitte alle Felder ausfüllen."}), 400
+
     conn = get_db()
-    count = conn.execute("SELECT COUNT(*) as c FROM subscriptions").fetchone()["c"]
+    exists = conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
+    if exists:
+        conn.close()
+        return jsonify({"ok": False, "error": "Dieser Benutzername ist schon vergeben."}), 400
+
+    enc_pw = fernet.encrypt(untis_password.encode()).decode() if fernet else untis_password
+    cur = conn.execute(
+        "INSERT INTO users (username, password_hash, display_name, untis_username, untis_password_enc, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (username, generate_password_hash(password), display_name, untis_username, enc_pw, dt.datetime.now(TZ).isoformat()),
+    )
+    user_id = cur.lastrowid
+    conn.commit()
     conn.close()
 
-    if count == 0:
-        return jsonify({"ok": False, "error": "Keine Push-Registrierung gefunden. Erst 'Push aktivieren' antippen und Berechtigung erlauben."})
+    ensure_default_settings(user_id)
+    reschedule_all_reminders()
 
-    send_push("🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", tag="test")
-    log_notification("🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", "test")
-    return jsonify({"ok": True, "subscriptions": count})
+    session["user_id"] = user_id
+    return jsonify({"ok": True, "username": username, "display_name": display_name})
 
 
-@app.route("/api/debug/exams-raw")
-def api_debug_exams_raw():
-    """Diagnose-Route: zeigt genau, was beim Klausuren-Abruf passiert."""
-    try:
-        session = untis_login()
-    except Exception as e:
-        return jsonify({"step": "login", "error": str(e)})
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json()
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
 
-    try:
-        exams = session.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=90))
-        session.logout()
-        return jsonify({"step": "ok", "count": len(exams), "raw": [str(e) for e in exams[:5]]})
-    except Exception as e:
-        session.logout()
-        return jsonify({"step": "exams_call", "error": str(e)})
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    conn.close()
+
+    if not row or not check_password_hash(row["password_hash"], password):
+        return jsonify({"ok": False, "error": "Benutzername oder Passwort falsch."}), 401
+
+    session["user_id"] = row["id"]
+    return jsonify({"ok": True, "username": row["username"], "display_name": row["display_name"]})
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/me")
+def api_me():
+    if "user_id" not in session:
+        return jsonify({"authenticated": False})
+    user = current_user()
+    if not user:
+        session.clear()
+        return jsonify({"authenticated": False})
+    return jsonify({"authenticated": True, "username": user["username"], "display_name": user["display_name"]})
+
+
+# ==================== API-Routen (Daten) ====================
 
 
 @app.route("/")
@@ -439,76 +611,114 @@ def vapid_public_key():
 
 
 @app.route("/api/subscribe", methods=["POST"])
+@login_required
 def subscribe():
     sub = request.get_json()
     conn = get_db()
     conn.execute(
-        "INSERT OR REPLACE INTO subscriptions (endpoint, data) VALUES (?, ?)",
-        (sub["endpoint"], json.dumps(sub)),
+        "INSERT OR REPLACE INTO subscriptions (user_id, endpoint, data) VALUES (?, ?, ?)",
+        (session["user_id"], sub["endpoint"], json.dumps(sub)),
     )
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
 
 
+@app.route("/api/test-push", methods=["POST"])
+@login_required
+def api_test_push():
+    uid = session["user_id"]
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) as c FROM subscriptions WHERE user_id = ?", (uid,)).fetchone()["c"]
+    conn.close()
+
+    if count == 0:
+        return jsonify({"ok": False, "error": "Keine Push-Registrierung gefunden. Erst 'Push aktivieren' antippen."})
+
+    send_push(uid, "🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", tag="test")
+    log_notification(uid, "🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", "test")
+    return jsonify({"ok": True, "subscriptions": count})
+
+
+@app.route("/api/debug/exams-raw")
+@login_required
+def api_debug_exams_raw():
+    user = current_user()
+    try:
+        session_ = untis_login(user)
+    except Exception as e:
+        return jsonify({"step": "login", "error": str(e)})
+    try:
+        exams = session_.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=90))
+        session_.logout()
+        return jsonify({"step": "ok", "count": len(exams), "raw": [str(e) for e in exams[:5]]})
+    except Exception as e:
+        session_.logout()
+        return jsonify({"step": "exams_call", "error": str(e)})
+
+
 @app.route("/api/timetable")
+@login_required
 def api_timetable():
-    return jsonify(fetch_timetable_days())
+    return jsonify(fetch_timetable_days(current_user()))
 
 
 @app.route("/api/exams")
+@login_required
 def api_exams():
-    return jsonify(fetch_exams())
+    return jsonify(fetch_exams(current_user()))
 
 
 @app.route("/api/tasks", methods=["GET", "POST"])
+@login_required
 def api_tasks():
+    uid = session["user_id"]
     conn = get_db()
     if request.method == "POST":
         data = request.get_json()
         conn.execute(
-            "INSERT INTO tasks (typ, fach, text, faellig, erstellt) VALUES (?, ?, ?, ?, ?)",
-            (
-                data.get("typ", "hausaufgabe"),
-                data["fach"],
-                data["text"],
-                data.get("faellig"),
-                dt.datetime.now(TZ).isoformat(),
-            ),
+            "INSERT INTO tasks (user_id, typ, fach, text, faellig, erstellt) VALUES (?, ?, ?, ?, ?, ?)",
+            (uid, data.get("typ", "hausaufgabe"), data["fach"], data["text"], data.get("faellig"), dt.datetime.now(TZ).isoformat()),
         )
         conn.commit()
 
-    rows = conn.execute("SELECT * FROM tasks WHERE erledigt = 0 ORDER BY faellig IS NULL, faellig").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM tasks WHERE user_id = ? AND erledigt = 0 ORDER BY faellig IS NULL, faellig", (uid,)
+    ).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/tasks/<int:task_id>", methods=["PATCH", "DELETE"])
+@login_required
 def api_task_detail(task_id):
+    uid = session["user_id"]
     conn = get_db()
     if request.method == "DELETE":
-        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, uid))
     else:
         data = request.get_json()
         if "erledigt" in data:
-            conn.execute("UPDATE tasks SET erledigt = ? WHERE id = ?", (int(data["erledigt"]), task_id))
+            conn.execute("UPDATE tasks SET erledigt = ? WHERE id = ? AND user_id = ?", (int(data["erledigt"]), task_id, uid))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
+@login_required
 def api_settings():
+    uid = session["user_id"]
     if request.method == "POST":
         data = request.get_json()
         for key, value in data.items():
-            set_setting(key, json.dumps(value) if isinstance(value, (list, dict)) else str(value))
+            set_setting(uid, key, json.dumps(value) if isinstance(value, (list, dict)) else str(value))
         if "reminder_times" in data:
-            reschedule_reminders(data["reminder_times"])
+            reschedule_all_reminders()
         return jsonify({"ok": True})
 
     conn = get_db()
-    rows = conn.execute("SELECT key, value FROM settings").fetchall()
+    rows = conn.execute("SELECT key, value FROM settings WHERE user_id = ?", (uid,)).fetchall()
     conn.close()
     settings = {}
     for r in rows:
@@ -516,21 +726,70 @@ def api_settings():
             settings[r["key"]] = json.loads(r["value"])
         except (json.JSONDecodeError, TypeError):
             settings[r["key"]] = r["value"]
+    user = current_user()
+    settings["display_name"] = user["display_name"]
     return jsonify(settings)
 
 
 @app.route("/api/notifications")
+@login_required
 def api_notifications():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM notifications ORDER BY erstellt DESC LIMIT 50").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM notifications WHERE user_id = ? ORDER BY erstellt DESC LIMIT 50", (session["user_id"],)
+    ).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
 
 @app.route("/api/notifications/<int:note_id>/read", methods=["POST"])
+@login_required
 def api_notification_read(note_id):
     conn = get_db()
-    conn.execute("UPDATE notifications SET gelesen = 1 WHERE id = ?", (note_id,))
+    conn.execute(
+        "UPDATE notifications SET gelesen = 1 WHERE id = ? AND user_id = ?", (note_id, session["user_id"])
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
+# ==================== Noten-Tracker ====================
+
+
+@app.route("/api/grades", methods=["GET", "POST"])
+@login_required
+def api_grades():
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "POST":
+        data = request.get_json()
+        conn.execute(
+            "INSERT INTO grades (user_id, fach, note, gewichtung, art, beschreibung, datum, erstellt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                uid,
+                data["fach"],
+                float(data["note"]),
+                float(data.get("gewichtung", 1)),
+                data.get("art", ""),
+                data.get("beschreibung", ""),
+                data.get("datum") or dt.date.today().isoformat(),
+                dt.datetime.now(TZ).isoformat(),
+            ),
+        )
+        conn.commit()
+
+    rows = conn.execute("SELECT * FROM grades WHERE user_id = ? ORDER BY datum DESC", (uid,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/grades/<int:grade_id>", methods=["DELETE"])
+@login_required
+def api_grade_delete(grade_id):
+    conn = get_db()
+    conn.execute("DELETE FROM grades WHERE id = ? AND user_id = ?", (grade_id, session["user_id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
