@@ -46,7 +46,21 @@ VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:test@example.c
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "bitte-in-render-setzen-dev-only")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+
+
+def try_untis_login(untis_username, untis_password):
+    """Prüft WebUntis-Zugangsdaten sofort, ohne dauerhafte Session. Gibt (ok, fehlertext) zurück."""
+    try:
+        s = webuntis.Session(
+            server=UNTIS_SERVER, username=untis_username, password=untis_password,
+            school=UNTIS_SCHOOL, useragent="Schulapp/2.0",
+        ).login()
+        s.logout()
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.secret_key = SECRET_KEY
@@ -531,10 +545,17 @@ def api_register():
         return jsonify({"ok": False, "error": "Bitte alle Felder ausfüllen."}), 400
 
     conn = get_db()
-    exists = conn.execute("SELECT 1 FROM users WHERE username = ?", (username,)).fetchone()
+    exists = conn.execute("SELECT 1 FROM users WHERE lower(username) = lower(?)", (username,)).fetchone()
     if exists:
         conn.close()
         return jsonify({"ok": False, "error": "Dieser Benutzername ist schon vergeben."}), 400
+    conn.close()
+
+    ok, err = try_untis_login(untis_username, untis_password)
+    if not ok:
+        return jsonify({"ok": False, "error": f"WebUntis-Zugangsdaten konnten nicht bestätigt werden. Bitte Benutzername/Passwort prüfen. ({err})"}), 400
+
+    conn = get_db()
 
     enc_pw = fernet.encrypt(untis_password.encode()).decode() if fernet else untis_password
     cur = conn.execute(
@@ -593,6 +614,58 @@ def api_me():
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+def admin_authorized():
+    return ADMIN_KEY and request.args.get("key") == ADMIN_KEY
+
+
+@app.route("/admin")
+def admin_dashboard():
+    if not admin_authorized():
+        return "Nicht autorisiert – Admin-Key fehlt oder ist falsch.", 403
+
+    conn = get_db()
+    users = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
+    rows = []
+    for u in users:
+        tasks_c = conn.execute("SELECT COUNT(*) c FROM tasks WHERE user_id=? AND erledigt=0", (u["id"],)).fetchone()["c"]
+        grades_c = conn.execute("SELECT COUNT(*) c FROM grades WHERE user_id=?", (u["id"],)).fetchone()["c"]
+        push_c = conn.execute("SELECT COUNT(*) c FROM subscriptions WHERE user_id=?", (u["id"],)).fetchone()["c"]
+        rows.append({
+            "id": u["id"], "username": u["username"], "display_name": u["display_name"],
+            "untis_username": u["untis_username"], "created_at": u["created_at"],
+            "tasks": tasks_c, "grades": grades_c, "push": push_c,
+        })
+    conn.close()
+    return render_template("admin.html", users=rows, key=ADMIN_KEY)
+
+
+@app.route("/admin/check/<int:user_id>")
+def admin_check(user_id):
+    if not admin_authorized():
+        return jsonify({"error": "unauthorized"}), 403
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({"ok": False, "error": "Nutzer nicht gefunden."})
+    pw = decrypt_untis_password(row["untis_password_enc"])
+    ok, err = try_untis_login(row["untis_username"], pw)
+    return jsonify({"ok": ok, "error": err})
+
+
+@app.route("/admin/delete/<int:user_id>", methods=["POST"])
+def admin_delete(user_id):
+    if not admin_authorized():
+        return jsonify({"error": "unauthorized"}), 403
+    conn = get_db()
+    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades"):
+        conn.execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
 
 
 @app.route("/sw.js")

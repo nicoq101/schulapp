@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<title>Admin – Schulapp</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0A0A0B; color: #F5F5F5; padding: 24px; }
+  h1 { font-size: 20px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 13px; }
+  th { color: #8A8D93; text-transform: uppercase; font-size: 11px; }
+  button { background: #1F2024; color: #F5F5F5; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px; margin-right: 6px; }
+  button:hover { background: #2A2C33; }
+  .status { font-weight: 600; }
+  .ok { color: #7CF5A0; }
+  .fail { color: #FF8080; }
+</style>
+</head>
+<body>
+  <h1>👥 Nutzer ({{ users|length }})</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>Login</th><th>Name</th><th>WebUntis-User</th><th>Aufgaben</th><th>Noten</th><th>Push</th><th>Seit</th><th>WebUntis-Status</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr id="row-{{ u.id }}">
+        <td>{{ u.username }}</td>
+        <td>{{ u.display_name }}</td>
+        <td>{{ u.untis_username }}</td>
+        <td>{{ u.tasks }}</td>
+        <td>{{ u.grades }}</td>
+        <td>{{ u.push }}</td>
+        <td>{{ u.created_at[:10] }}</td>
+        <td class="status" id="status-{{ u.id }}">–</td>
+        <td>
+          <button onclick="check({{ u.id }})">WebUntis prüfen</button>
+          <button onclick="del({{ u.id }}, '{{ u.username }}')">Löschen</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+<script>
+const KEY = "{{ key }}";
+
+async function check(id) {
+  const el = document.getElementById("status-" + id);
+  el.textContent = "prüfe …";
+  const res = await fetch(`/admin/check/${id}?key=${KEY}`);
+  const data = await res.json();
+  el.textContent = data.ok ? "✅ funktioniert" : "❌ " + (data.error || "Fehler");
+  el.className = "status " + (data.ok ? "ok" : "fail");
+}
+
+async function del(id, name) {
+  if (!confirm(`Account "${name}" wirklich komplett löschen?`)) return;
+  await fetch(`/admin/delete/${id}?key=${KEY}`, { method: "POST" });
+  document.getElementById("row-" + id).remove();
+}
+</script>
+</body>
+</html>
