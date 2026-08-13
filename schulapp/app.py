@@ -727,6 +727,30 @@ def admin_logout():
     return jsonify({"ok": True})
 
 
+@app.route("/admin/lockouts")
+def admin_lockouts():
+    if not admin_authorized():
+        return jsonify({"error": "unauthorized"}), 403
+    conn = get_db()
+    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=LOCKOUT_HOURS)).isoformat()
+    rows = conn.execute(
+        "SELECT ip, scope, COUNT(*) c, MAX(attempt_time) last FROM failed_logins "
+        "WHERE attempt_time > ? GROUP BY ip, scope HAVING c >= ? ORDER BY last DESC",
+        (cutoff, MAX_ATTEMPTS),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/admin/unlock", methods=["POST"])
+def admin_unlock():
+    if not admin_authorized():
+        return jsonify({"error": "unauthorized"}), 403
+    data = request.get_json()
+    clear_failed_logins(data["ip"], data.get("scope", "user"))
+    return jsonify({"ok": True})
+
+
 @app.route("/admin/check/<int:user_id>")
 def admin_check(user_id):
     if not admin_authorized():

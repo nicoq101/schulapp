@@ -18,6 +18,12 @@
 </head>
 <body>
   <h1>👥 Nutzer ({{ users|length }}) <button onclick="logout()" style="float:right;">Abmelden</button></h1>
+
+  <h2 style="font-size:15px; margin-top:28px;">🔒 Gesperrte IPs</h2>
+  <table id="lockout-table">
+    <thead><tr><th>IP</th><th>Bereich</th><th>Fehlversuche</th><th>Letzter Versuch</th><th></th></tr></thead>
+    <tbody id="lockout-body"><tr><td colspan="5">Lädt …</td></tr></tbody>
+  </table>
   <table>
     <thead>
       <tr>
@@ -64,6 +70,35 @@ async function logout() {
   await fetch("/admin/logout", { method: "POST" });
   location.reload();
 }
+
+async function loadLockouts() {
+  const res = await fetch("/admin/lockouts");
+  const data = await res.json();
+  const body = document.getElementById("lockout-body");
+  if (data.length === 0) {
+    body.innerHTML = `<tr><td colspan="5">Aktuell keine gesperrten IPs.</td></tr>`;
+    return;
+  }
+  body.innerHTML = data
+    .map(
+      (l) => `<tr>
+        <td>${l.ip}</td><td>${l.scope}</td><td>${l.c}</td><td>${l.last.slice(0, 16).replace("T", " ")}</td>
+        <td><button onclick="unlock('${l.ip}', '${l.scope}')">Entsperren</button></td>
+      </tr>`
+    )
+    .join("");
+}
+
+async function unlock(ip, scope) {
+  await fetch("/admin/unlock", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ip, scope }),
+  });
+  loadLockouts();
+}
+
+loadLockouts();
 </script>
 </body>
 </html>
