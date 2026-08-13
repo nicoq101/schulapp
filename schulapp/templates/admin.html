@@ -17,7 +17,7 @@
 </style>
 </head>
 <body>
-  <h1>👥 Nutzer ({{ users|length }})</h1>
+  <h1>👥 Nutzer ({{ users|length }}) <button onclick="logout()" style="float:right;">Abmelden</button></h1>
   <table>
     <thead>
       <tr>
@@ -45,12 +45,10 @@
   </table>
 
 <script>
-const KEY = "{{ key }}";
-
 async function check(id) {
   const el = document.getElementById("status-" + id);
   el.textContent = "prüfe …";
-  const res = await fetch(`/admin/check/${id}?key=${KEY}`);
+  const res = await fetch(`/admin/check/${id}`);
   const data = await res.json();
   el.textContent = data.ok ? "✅ funktioniert" : "❌ " + (data.error || "Fehler");
   el.className = "status " + (data.ok ? "ok" : "fail");
@@ -58,8 +56,13 @@ async function check(id) {
 
 async function del(id, name) {
   if (!confirm(`Account "${name}" wirklich komplett löschen?`)) return;
-  await fetch(`/admin/delete/${id}?key=${KEY}`, { method: "POST" });
+  await fetch(`/admin/delete/${id}`, { method: "POST" });
   document.getElementById("row-" + id).remove();
+}
+
+async function logout() {
+  await fetch("/admin/logout", { method: "POST" });
+  location.reload();
 }
 </script>
 </body>

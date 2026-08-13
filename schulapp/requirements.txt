@@ -5,3 +5,4 @@ webuntis==0.1.25
 requests==2.32.3
 gunicorn==22.0.0
 cryptography==43.0.1
+pyotp==2.9.0

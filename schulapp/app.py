@@ -25,6 +25,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from apscheduler.schedulers.background import BackgroundScheduler
 from pywebpush import webpush, WebPushException
 from cryptography.fernet import Fernet
+import pyotp
 import webuntis
 
 BASE_DIR = Path(__file__).parent
@@ -46,7 +47,8 @@ VAPID_CLAIMS_EMAIL = os.environ.get("VAPID_CLAIMS_EMAIL", "mailto:test@example.c
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "bitte-in-render-setzen-dev-only")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
-ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
+ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
 fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
 
 
@@ -149,6 +151,13 @@ def init_db():
             datum TEXT,
             erstellt TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS failed_logins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            scope TEXT NOT NULL DEFAULT 'user',
+            attempt_time TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -200,6 +209,44 @@ def migrate_legacy_data(conn):
 
 
 # ==================== Auth-Hilfsfunktionen ====================
+
+
+MAX_ATTEMPTS = 5
+LOCKOUT_HOURS = 24
+
+
+def get_client_ip():
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def is_locked_out(ip, scope="user"):
+    conn = get_db()
+    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=LOCKOUT_HOURS)).isoformat()
+    count = conn.execute(
+        "SELECT COUNT(*) c FROM failed_logins WHERE ip = ? AND scope = ? AND attempt_time > ?", (ip, scope, cutoff)
+    ).fetchone()["c"]
+    conn.close()
+    return count >= MAX_ATTEMPTS
+
+
+def record_failed_login(ip, scope="user"):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO failed_logins (ip, scope, attempt_time) VALUES (?, ?, ?)",
+        (ip, scope, dt.datetime.now(TZ).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_failed_logins(ip, scope="user"):
+    conn = get_db()
+    conn.execute("DELETE FROM failed_logins WHERE ip = ? AND scope = ?", (ip, scope))
+    conn.commit()
+    conn.close()
 
 
 def login_required(f):
@@ -582,6 +629,10 @@ def api_register():
 
 @app.route("/api/login", methods=["POST"])
 def api_login():
+    ip = get_client_ip()
+    if is_locked_out(ip, "user"):
+        return jsonify({"ok": False, "error": f"Zu viele Fehlversuche. Bitte in {LOCKOUT_HOURS} Stunden erneut probieren."}), 429
+
     data = request.get_json()
     username = data.get("username", "").strip()
     password = data.get("password", "")
@@ -591,8 +642,10 @@ def api_login():
     conn.close()
 
     if not row or not check_password_hash(row["password_hash"], password):
+        record_failed_login(ip, "user")
         return jsonify({"ok": False, "error": "Benutzername oder Passwort falsch."}), 401
 
+    clear_failed_logins(ip, "user")
     session["user_id"] = row["id"]
     return jsonify({"ok": True, "username": row["username"], "display_name": row["display_name"]})
 
@@ -623,13 +676,13 @@ def index():
 
 
 def admin_authorized():
-    return ADMIN_KEY and request.args.get("key") == ADMIN_KEY
+    return session.get("is_admin") is True
 
 
 @app.route("/admin")
 def admin_dashboard():
     if not admin_authorized():
-        return "Nicht autorisiert – Admin-Key fehlt oder ist falsch.", 403
+        return render_template("admin_login.html", error=None)
 
     conn = get_db()
     users = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
@@ -644,7 +697,34 @@ def admin_dashboard():
             "tasks": tasks_c, "grades": grades_c, "push": push_c,
         })
     conn.close()
-    return render_template("admin.html", users=rows, key=ADMIN_KEY)
+    return render_template("admin.html", users=rows)
+
+
+@app.route("/admin/login", methods=["POST"])
+def admin_login():
+    ip = get_client_ip()
+    if is_locked_out(ip, "admin"):
+        return render_template("admin_login.html", error=f"Zu viele Fehlversuche. Bitte in {LOCKOUT_HOURS} Stunden erneut probieren.")
+
+    password = request.form.get("password", "")
+    code = request.form.get("code", "")
+
+    pw_ok = ADMIN_PASSWORD_HASH and check_password_hash(ADMIN_PASSWORD_HASH, password)
+    totp_ok = ADMIN_TOTP_SECRET and pyotp.TOTP(ADMIN_TOTP_SECRET).verify(code, valid_window=1)
+
+    if not (pw_ok and totp_ok):
+        record_failed_login(ip, "admin")
+        return render_template("admin_login.html", error="Passwort oder Code falsch.")
+
+    clear_failed_logins(ip, "admin")
+    session["is_admin"] = True
+    return admin_dashboard()
+
+
+@app.route("/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop("is_admin", None)
+    return jsonify({"ok": True})
 
 
 @app.route("/admin/check/<int:user_id>")
