@@ -97,7 +97,7 @@ def init_db():
         "notify_pruefungen": "true",
         "reminder_times": json.dumps(["17:30", "19:00", "21:30"]),
         "theme": "system",
-        "name": "",
+        "name": "Nico",
         "klasse": "",
     }
     for k, v in defaults.items():
@@ -375,6 +375,37 @@ def reschedule_reminders(times):
 
 
 # ==================== API-Routen ====================
+
+
+@app.route("/api/test-push", methods=["POST"])
+def api_test_push():
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) as c FROM subscriptions").fetchone()["c"]
+    conn.close()
+
+    if count == 0:
+        return jsonify({"ok": False, "error": "Keine Push-Registrierung gefunden. Erst 'Push aktivieren' antippen und Berechtigung erlauben."})
+
+    send_push("🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", tag="test")
+    log_notification("🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", "test")
+    return jsonify({"ok": True, "subscriptions": count})
+
+
+@app.route("/api/debug/exams-raw")
+def api_debug_exams_raw():
+    """Diagnose-Route: zeigt genau, was beim Klausuren-Abruf passiert."""
+    try:
+        session = untis_login()
+    except Exception as e:
+        return jsonify({"step": "login", "error": str(e)})
+
+    try:
+        exams = session.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=90))
+        session.logout()
+        return jsonify({"step": "ok", "count": len(exams), "raw": [str(e) for e in exams[:5]]})
+    except Exception as e:
+        session.logout()
+        return jsonify({"step": "exams_call", "error": str(e)})
 
 
 @app.route("/")
