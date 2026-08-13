@@ -157,6 +157,14 @@
       </div>
     </div>
 
+    <div class="section-title">Notenskala</div>
+    <div class="card">
+      <div class="segmented" id="notenskala-segmented">
+        <button data-skala="unterstufe">Note (1–6)</button>
+        <button data-skala="oberstufe">Punkte (0–15 NP)</button>
+      </div>
+    </div>
+
     <div class="section-title">Benachrichtigungen</div>
     <div class="card">
       <div class="settings-row">
@@ -243,8 +251,8 @@
       <input type="date" id="new-faellig" />
     </div>
     <div class="field" id="field-note" style="display:none;">
-      <label>Note</label>
-      <input type="number" id="new-note" placeholder="z.B. 2" step="0.1" min="1" max="6" />
+      <label id="note-label">Note</label>
+      <input type="number" id="new-note" placeholder="z.B. 2" step="0.5" min="1" max="6" />
     </div>
     <div class="field" id="field-gewichtung" style="display:none;">
       <label>Gewichtung</label>

@@ -250,6 +250,7 @@ DEFAULT_SETTINGS = {
     "reminder_times": json.dumps(["17:30", "19:00", "21:30"]),
     "theme": "system",
     "klasse": "",
+    "notenskala": "unterstufe",  # oder "oberstufe" (0-15 Notenpunkte)
 }
 
 
@@ -549,6 +550,11 @@ def api_register():
     if exists:
         conn.close()
         return jsonify({"ok": False, "error": "Dieser Benutzername ist schon vergeben."}), 400
+
+    untis_taken = conn.execute("SELECT 1 FROM users WHERE lower(untis_username) = lower(?)", (untis_username,)).fetchone()
+    if untis_taken:
+        conn.close()
+        return jsonify({"ok": False, "error": "Für diesen WebUntis-Zugang existiert bereits ein App-Account."}), 400
     conn.close()
 
     ok, err = try_untis_login(untis_username, untis_password)

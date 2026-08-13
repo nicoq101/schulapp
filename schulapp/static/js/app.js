@@ -343,7 +343,33 @@ document.getElementById("theme-segmented").addEventListener("click", async (e) =
   await api("/api/settings", { method: "POST", body: JSON.stringify({ theme }) });
 });
 
+document.getElementById("notenskala-segmented").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const skala = btn.dataset.skala;
+  state.settings.notenskala = skala;
+  applyNotenskala(skala);
+  await api("/api/settings", { method: "POST", body: JSON.stringify({ notenskala: skala }) });
+  renderNoten(state.grades || []);
+});
+
+function applyNotenskala(skala) {
+  document.querySelectorAll("#notenskala-segmented button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.skala === skala);
+  });
+  const noteInput = document.getElementById("new-note");
+  const label = document.getElementById("note-label");
+  if (skala === "oberstufe") {
+    noteInput.min = 0; noteInput.max = 15; noteInput.step = 1; noteInput.placeholder = "0–15";
+    label.textContent = "Punkte (Notenpunkte)";
+  } else {
+    noteInput.min = 1; noteInput.max = 6; noteInput.step = 0.5; noteInput.placeholder = "1–6";
+    label.textContent = "Note";
+  }
+}
+
 function renderEinstellungen() {
+  applyNotenskala(state.settings.notenskala || "unterstufe");
   document.querySelectorAll(".switch[data-setting]").forEach((sw) => {
     const key = sw.dataset.setting;
     sw.classList.toggle("on", state.settings[key] === "true" || state.settings[key] === true);
@@ -628,9 +654,12 @@ function switchTaskType(typ) {
   document.getElementById("field-note").style.display = isNote ? "block" : "none";
   document.getElementById("field-gewichtung").style.display = isNote ? "block" : "none";
   document.getElementById("field-art").style.display = isNote ? "block" : "none";
+  if (isNote) applyNotenskala(state.settings.notenskala || "unterstufe");
 }
 
 function renderNoten(grades) {
+  const skala = state.settings.notenskala || "unterstufe";
+  const unit = skala === "oberstufe" ? " NP" : "";
   const bySubject = {};
   for (const g of grades) (bySubject[g.fach] ||= []).push(g);
 
@@ -639,7 +668,7 @@ function renderNoten(grades) {
     totalWeighted += g.note * g.gewichtung;
     totalWeight += g.gewichtung;
   }
-  document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(2) : "–";
+  document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–";
   document.getElementById("tile-anzahl-noten").textContent = grades.length;
 
   const bySubjectEl = document.getElementById("grades-by-subject");
@@ -652,10 +681,10 @@ function renderNoten(grades) {
         const list = bySubject[fach];
         const w = list.reduce((s, g) => s + g.note * g.gewichtung, 0);
         const wSum = list.reduce((s, g) => s + g.gewichtung, 0);
-        const schnitt = (w / wSum).toFixed(2);
+        const schnitt = (w / wSum).toFixed(skala === "oberstufe" ? 1 : 2);
         return `<div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
           <div><div class="task-fach">${escapeHtml(fach)}</div><div class="task-text">${list.length} Note${list.length !== 1 ? "n" : ""}</div></div>
-          <div class="value mono" style="font-size:20px;">${schnitt}</div>
+          <div class="value mono" style="font-size:20px;">${schnitt}${unit}</div>
         </div>`;
       })
       .join("");
@@ -674,7 +703,7 @@ function renderNoten(grades) {
             <div class="task-text">${g.beschreibung ? escapeHtml(g.beschreibung) : fmtDate(g.datum)}</div>
             <div class="task-due later">Gewichtung ${g.gewichtung}x</div>
           </div>
-          <div class="value mono" style="font-size:20px;">${g.note}</div>
+          <div class="value mono" style="font-size:20px;">${g.note}${unit}</div>
           <button class="icon-btn" data-action="delete-grade" style="width:32px;height:32px;">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
           </button>
