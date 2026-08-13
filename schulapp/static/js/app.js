@@ -10,6 +10,13 @@ let state = {
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
+// Leichtes haptisches Feedback, wo das Gerät es unterstützt (Android/Desktop;
+// iOS blockiert die Vibration API in Safari, daher übernimmt dort die
+// visuelle Press-Animation aus dem CSS die "Haptik").
+function haptic(ms = 8) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
 // ==================== Hilfsfunktionen ====================
 
 function todayISO() {
@@ -44,6 +51,7 @@ async function api(path, options = {}) {
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
+    haptic(6);
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
     document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
     tab.classList.add("active");
@@ -230,6 +238,7 @@ function renderTaskRow(t) {
 function attachTaskHandlers(container) {
   container.querySelectorAll('[data-action="done"]').forEach((btn) => {
     btn.addEventListener("click", async () => {
+      haptic(12);
       const id = btn.closest(".task-row").dataset.id;
       await api(`/api/tasks/${id}`, { method: "PATCH", body: JSON.stringify({ erledigt: 1 }) });
       state.tasks = state.tasks.filter((t) => String(t.id) !== id);
@@ -336,6 +345,7 @@ function renderEinstellungen() {
 
 document.querySelectorAll(".switch[data-setting]").forEach((sw) => {
   sw.addEventListener("click", async () => {
+    haptic(6);
     const key = sw.dataset.setting;
     const newVal = !sw.classList.contains("on");
     sw.classList.toggle("on", newVal);
@@ -512,6 +522,16 @@ function updatePushToggle(active) {
     ? "Aktiviert – du bekommst Benachrichtigungen."
     : "Noch nicht aktiviert";
 }
+
+document.getElementById("test-push-btn").addEventListener("click", async () => {
+  const btn = document.getElementById("test-push-btn");
+  btn.textContent = "Sende …";
+  const result = await api("/api/test-push", { method: "POST" });
+  btn.textContent = result.ok
+    ? "Gesendet! Kommt sie an?"
+    : result.error || "Fehler";
+  setTimeout(() => (btn.textContent = "Testnachricht senden"), 3000);
+});
 
 // ==================== Start ====================
 
