@@ -390,11 +390,49 @@ def entry_key(entry):
 
 
 def diff_timetable(old_entries, new_entries):
+    """Vergleicht zwei Stundenplan-Stände.
+
+    Schritt 1: exakter Abgleich über (Datum, Startzeit, Fach). Das erkennt
+    Raum-, Lehrer- und Ausfall-Änderungen zuverlässig, da diese Felder
+    nicht im Schlüssel stecken.
+
+    Schritt 2: für alle dabei nicht zugeordneten Einträge folgt ein
+    zweiter Abgleich pro (Datum, Fach) in Start-Reihenfolge. Das fängt
+    genau den Fall ab, dass sich die Startzeit einer Stunde ändert –
+    ohne Schritt 2 würde eine verschobene Stunde fälschlich als
+    'entfernt' + 'neu hinzugekommen' gewertet, statt als 'geändert' mit
+    der konkreten Meldung ('X wurde von 10:15 auf 11:05 verschoben').
+    """
     old_map = {entry_key(e): e for e in old_entries}
     new_map = {entry_key(e): e for e in new_entries}
-    added = [new_map[k] for k in new_map if k not in old_map]
-    removed = [old_map[k] for k in old_map if k not in new_map]
+
     changed = [(old_map[k], new_map[k]) for k in new_map if k in old_map and old_map[k] != new_map[k]]
+
+    remaining_old = [e for k, e in old_map.items() if k not in new_map]
+    remaining_new = [e for k, e in new_map.items() if k not in old_map]
+
+    def group_by_date_subject(entries):
+        groups = {}
+        for e in entries:
+            groups.setdefault((e["date"], e["subject"]), []).append(e)
+        for lst in groups.values():
+            lst.sort(key=lambda e: e["start"])
+        return groups
+
+    old_groups = group_by_date_subject(remaining_old)
+    new_groups = group_by_date_subject(remaining_new)
+
+    added, removed = [], []
+    for key in set(old_groups) | set(new_groups):
+        old_list = old_groups.get(key, [])
+        new_list = new_groups.get(key, [])
+        paired = min(len(old_list), len(new_list))
+        for i in range(paired):
+            if old_list[i] != new_list[i]:
+                changed.append((old_list[i], new_list[i]))
+        removed.extend(old_list[paired:])
+        added.extend(new_list[paired:])
+
     return added, removed, changed
 
 
