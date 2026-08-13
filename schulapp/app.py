@@ -338,15 +338,25 @@ def job_exam_countdown():
     if get_setting("notify_pruefungen") != "true":
         return
 
-    exams = fetch_exams()
     today = dt.date.today()
+
+    # Automatisch von WebUntis (falls die Schule den Zugriff erlaubt)
+    exams = [{"name": e["name"], "date": e["date"]} for e in fetch_exams()]
+
+    # Manuell in der App eingetragene Klausuren
+    conn = get_db()
+    manual = conn.execute(
+        "SELECT fach, text, faellig FROM tasks WHERE typ = 'pruefung' AND faellig IS NOT NULL AND erledigt = 0"
+    ).fetchall()
+    conn.close()
+    exams += [{"name": f"{m['fach']}: {m['text']}", "date": m["faellig"]} for m in manual]
 
     for e in exams:
         exam_date = dt.date.fromisoformat(e["date"])
         days_left = (exam_date - today).days
         if days_left in (7, 3, 1):
             title = f"📅 {e['name']} in {days_left} Tag{'en' if days_left != 1 else ''}"
-            body = f"Am {exam_date.strftime('%d.%m.')} um {e['time']} Uhr."
+            body = f"Am {exam_date.strftime('%d.%m.')}."
             send_push(title, body, tag="pruefung")
             log_notification(title, body, "pruefung")
 
