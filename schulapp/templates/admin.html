@@ -2,39 +2,114 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Admin – Schulapp</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
 <style>
-  body { font-family: -apple-system, sans-serif; background: #0A0A0B; color: #F5F5F5; padding: 24px; }
-  h1 { font-size: 20px; }
-  h2 { font-size: 15px; margin-top: 28px; }
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 13px; }
-  th { color: #8A8D93; text-transform: uppercase; font-size: 11px; }
-  button { background: #1F2024; color: #F5F5F5; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 6px 10px; cursor: pointer; font-size: 12px; margin-right: 6px; }
-  button:hover { background: #2A2C33; }
-  .status { font-weight: 600; }
-  .ok { color: #7CF5A0; }
-  .fail { color: #FF8080; }
-  .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#7CF5A0; margin-right:6px; animation: blink 1.6s infinite; }
+  :root {
+    --bg: #0A0A0B;
+    --surface: #17181B;
+    --surface-2: #1F2024;
+    --text: #F5F5F5;
+    --text-muted: #8A8D93;
+    --border: rgba(255, 255, 255, 0.10);
+    --accent: #FFFFFF;
+    --accent-ink: #0A0A0B;
+    --ok: #7CF5A0;
+    --fail: #FF8080;
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 28px 20px 60px;
+    max-width: 980px;
+    margin-inline: auto;
+  }
+  h1, h2 { font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.01em; margin: 0; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
+  .topbar h1 { font-size: 20px; display: flex; align-items: center; gap: 10px; }
+  .count-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 10px;
+    color: var(--text-muted);
+  }
+  .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background: var(--ok); animation: blink 1.6s infinite; }
   @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+
+  .section-title {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--text-muted); margin: 28px 0 12px;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 12px 16px; font-size: 13px; }
+  th {
+    color: var(--text-muted); text-transform: uppercase; font-size: 10px;
+    letter-spacing: 0.05em; font-weight: 600; border-bottom: 1px solid var(--border);
+  }
+  td { border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .empty-row td { color: var(--text-muted); text-align: center; padding: 24px; }
+
+  button {
+    font-family: inherit; cursor: pointer; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text);
+    border-radius: 8px; padding: 7px 11px; font-size: 12px; font-weight: 500;
+    margin-right: 6px; transition: background 0.15s ease, transform 0.1s ease;
+  }
+  button:hover { background: #2A2C33; }
+  button:active { transform: scale(0.96); }
+  .btn-logout { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+  .badge {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
+  }
+  .badge.ok { color: var(--ok); border-color: rgba(124,245,160,0.3); background: rgba(124,245,160,0.08); }
+  .badge.fail { color: var(--fail); border-color: rgba(255,128,128,0.3); background: rgba(255,128,128,0.08); }
+  .badge.neutral { color: var(--text-muted); }
+  .badge.none { color: var(--text-muted); font-style: italic; }
 </style>
 </head>
 <body>
-  <h1><span class="live-dot"></span>Nutzer (<span id="user-count">…</span>) <button onclick="logout()" style="float:right;">Abmelden</button></h1>
 
-  <h2>🔒 Gesperrte IPs</h2>
-  <table>
-    <thead><tr><th>IP</th><th>Bereich</th><th>Fehlversuche</th><th>Letzter Versuch</th><th></th></tr></thead>
-    <tbody id="lockout-body"><tr><td colspan="5">Lädt …</td></tr></tbody>
-  </table>
+  <div class="topbar">
+    <h1><span class="live-dot"></span>Accounts <span class="count-badge mono" id="user-count">…</span></h1>
+    <button class="btn-logout" onclick="logout()">Abmelden</button>
+  </div>
 
-  <h2>👥 Accounts</h2>
-  <table>
-    <thead>
-      <tr><th>Login</th><th>Name</th><th>WebUntis-User</th><th>Aufgaben</th><th>Noten</th><th>Push</th><th>Seit</th><th>WebUntis-Status</th><th></th></tr>
-    </thead>
-    <tbody id="users-body"><tr><td colspan="9">Lädt …</td></tr></tbody>
-  </table>
+  <div class="section-title">🔒 Gesperrte IPs</div>
+  <div class="card">
+    <table>
+      <thead><tr><th>IP</th><th>Bereich</th><th>Fehlversuche</th><th>Letzter Versuch</th><th></th></tr></thead>
+      <tbody id="lockout-body"><tr class="empty-row"><td colspan="5">Lädt …</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-title">👥 Accounts</div>
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>Login</th><th>Name</th><th>WebUntis-User</th><th>Aufgaben</th><th>Noten</th><th>Push</th><th>Seit</th><th>WebUntis-Status</th><th></th></tr>
+      </thead>
+      <tbody id="users-body"><tr class="empty-row"><td colspan="9">Lädt …</td></tr></tbody>
+    </table>
+  </div>
 
 <script>
 const REFRESH_MS = 10000;
@@ -48,19 +123,27 @@ async function loadUsers() {
 
   const body = document.getElementById("users-body");
   if (users.length === 0) {
-    body.innerHTML = `<tr><td colspan="9">Noch keine Accounts.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="9">Noch keine Accounts.</td></tr>`;
     return;
   }
   body.innerHTML = users.map((u) => {
     const cached = statusCache[u.id];
-    const statusText = u.untis_username
-      ? (cached ? (cached.ok ? "✅ funktioniert" : "❌ " + cached.error) : "–")
-      : "– kein WebUntis";
-    const statusClass = cached ? (cached.ok ? "ok" : "fail") : "";
+    let badgeClass = "none";
+    let statusText = "kein WebUntis";
+    if (u.untis_username) {
+      if (cached) {
+        badgeClass = cached.ok ? "ok" : "fail";
+        statusText = cached.ok ? "funktioniert" : (cached.error || "Fehler");
+      } else {
+        badgeClass = "neutral";
+        statusText = "noch nicht geprüft";
+      }
+    }
     return `<tr id="row-${u.id}">
-      <td>${u.username}</td><td>${u.display_name}</td><td>${u.untis_username || "–"}</td>
-      <td>${u.tasks}</td><td>${u.grades}</td><td>${u.push}</td><td>${u.created_at.slice(0,10)}</td>
-      <td class="status ${statusClass}" id="status-${u.id}">${statusText}</td>
+      <td class="mono">${u.username}</td><td>${u.display_name}</td><td class="mono">${u.untis_username || "–"}</td>
+      <td class="mono">${u.tasks}</td><td class="mono">${u.grades}</td><td class="mono">${u.push}</td>
+      <td class="mono">${u.created_at.slice(0,10)}</td>
+      <td><span class="badge ${badgeClass}" id="status-${u.id}">${statusText}</span></td>
       <td>
         <button onclick="check(${u.id})">WebUntis prüfen</button>
         <button onclick="del(${u.id}, '${u.username}')">Löschen</button>
@@ -72,11 +155,12 @@ async function loadUsers() {
 async function check(id) {
   const el = document.getElementById("status-" + id);
   el.textContent = "prüfe …";
+  el.className = "badge neutral";
   const res = await fetch(`/admin/check/${id}`);
   const data = await res.json();
   statusCache[id] = data;
-  el.textContent = data.ok ? "✅ funktioniert" : "❌ " + (data.error || "Fehler");
-  el.className = "status " + (data.ok ? "ok" : "fail");
+  el.textContent = data.ok ? "funktioniert" : (data.error || "Fehler");
+  el.className = "badge " + (data.ok ? "ok" : "fail");
 }
 
 async function del(id, name) {
@@ -91,11 +175,11 @@ async function loadLockouts() {
   const data = await res.json();
   const body = document.getElementById("lockout-body");
   if (data.length === 0) {
-    body.innerHTML = `<tr><td colspan="5">Aktuell keine gesperrten IPs.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="5">Aktuell keine gesperrten IPs.</td></tr>`;
     return;
   }
   body.innerHTML = data.map((l) => `<tr>
-    <td>${l.ip}</td><td>${l.scope}</td><td>${l.c}</td><td>${l.last.slice(0,16).replace("T"," ")}</td>
+    <td class="mono">${l.ip}</td><td>${l.scope}</td><td class="mono">${l.c}</td><td class="mono">${l.last.slice(0,16).replace("T"," ")}</td>
     <td><button onclick="unlock('${l.ip}', '${l.scope}')">Entsperren</button></td>
   </tr>`).join("");
 }
