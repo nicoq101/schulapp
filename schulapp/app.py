@@ -53,9 +53,9 @@ ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
 fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
 
 # KI-Lernassistent
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "claude-sonnet-5")  # z.B. "claude-haiku-4-5-20251001" für günstiger/schneller
-ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "gemini-flash-latest")  # Alias, zeigt immer auf die neueste Flash-Version
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def try_untis_login(untis_username, untis_password):
@@ -580,25 +580,30 @@ KONTEXT ZUM NUTZER (nur verwenden, wenn gerade relevant – nicht aufdrängen)
 {build_tutor_context(user, fach)}"""
 
 
-def call_claude_tutor(system_prompt, history):
-    if not ANTHROPIC_API_KEY:
-        return None, "Der KI-Tutor ist noch nicht eingerichtet (ANTHROPIC_API_KEY fehlt in den Umgebungsvariablen)."
+def call_tutor_ai(system_prompt, history):
+    if not GEMINI_API_KEY:
+        return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt in den Umgebungsvariablen)."
     try:
+        contents = [
+            {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+            for m in history
+        ]
         resp = requests.post(
-            ANTHROPIC_API_URL,
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
+            GEMINI_API_URL.format(model=TUTOR_MODEL),
+            headers={"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"},
+            json={
+                "systemInstruction": {"parts": [{"text": system_prompt}]},
+                "contents": contents,
+                "generationConfig": {"maxOutputTokens": 1000},
             },
-            json={"model": TUTOR_MODEL, "max_tokens": 1000, "system": system_prompt, "messages": history},
             timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
-        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts)
         return text.strip(), None
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, KeyError, IndexError) as e:
         return None, f"KI-Tutor gerade nicht erreichbar: {e}"
 
 
@@ -1199,7 +1204,7 @@ def api_tutor_chat():
     history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
     system_prompt = build_tutor_system_prompt(user, fach, level)
-    reply, error = call_claude_tutor(system_prompt, history)
+    reply, error = call_tutor_ai(system_prompt, history)
 
     if error:
         return jsonify({"ok": False, "error": error})
