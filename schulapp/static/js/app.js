@@ -57,21 +57,23 @@ document.querySelectorAll(".tab").forEach((tab) => {
     document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
     tab.classList.add("active");
     document.getElementById(`screen-${tab.dataset.screen}`).classList.add("active");
+    document.getElementById("fab-add").style.display = tab.dataset.screen === "tutor" ? "none" : "flex";
   });
 });
 
 // ==================== Daten laden ====================
 
 async function loadAll() {
-  const [timetable, exams, tasks, settings, notifications, grades] = await Promise.all([
+  const [timetable, exams, tasks, settings, notifications, grades, tutorHistory] = await Promise.all([
     api("/api/timetable"),
     api("/api/exams"),
     api("/api/tasks"),
     api("/api/settings"),
     api("/api/notifications"),
     api("/api/grades"),
+    api("/api/tutor/history"),
   ]);
-  state = { timetable, exams, tasks, settings, notifications, grades };
+  state = { timetable, exams, tasks, settings, notifications, grades, tutorHistory };
   renderAll();
 }
 
@@ -84,6 +86,8 @@ function renderAll() {
   renderEinstellungen();
   renderNotifications();
   renderNoten(state.grades || []);
+  populateTutorFaecher();
+  renderTutorChat(state.tutorHistory || []);
 }
 
 // ==================== Begrüßung ====================
@@ -680,13 +684,6 @@ function renderNoten(grades) {
   document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–";
   document.getElementById("tile-anzahl-noten").textContent = grades.length;
 
-  const calcFachEl = document.getElementById("calc-fach");
-  const prevCalcFach = calcFachEl.value;
-  calcFachEl.innerHTML =
-    `<option value="__all__">Gesamtschnitt</option>` +
-    Object.keys(bySubject).sort().map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
-  if ([...calcFachEl.options].some((o) => o.value === prevCalcFach)) calcFachEl.value = prevCalcFach;
-
   const bySubjectEl = document.getElementById("grades-by-subject");
   const subjects = Object.keys(bySubject).sort();
   if (subjects.length === 0) {
@@ -736,64 +733,110 @@ function renderNoten(grades) {
   }
 }
 
-// ==================== Notenrechner ====================
+// ==================== KI-Lernassistent ====================
 
-document.getElementById("calc-btn").addEventListener("click", () => {
-  const resultEl = document.getElementById("calc-result");
-  const skala = state.settings.notenskala || "unterstufe";
-  const fach = document.getElementById("calc-fach").value;
-  const zielRaw = document.getElementById("calc-ziel").value;
-  const gewichtung = parseFloat(document.getElementById("calc-gewichtung").value) || 1;
+let tutorLevel = "";
+let tutorSending = false;
 
-  resultEl.style.display = "block";
+const TUTOR_LEVEL_LABELS = {
+  hinweis: "💡 Hinweis",
+  schritt: "🧩 Nächster Schritt",
+  erklaerung: "📖 Erklärung",
+  loesung: "✅ Lösung",
+};
 
-  if (!zielRaw) {
-    resultEl.className = "calc-result warn";
-    resultEl.innerHTML = "Bitte einen Zielschnitt eingeben.";
+function populateTutorFaecher() {
+  const select = document.getElementById("tutor-fach");
+  const faecher = new Set();
+  (state.tasks || []).forEach((t) => faecher.add(t.fach));
+  (state.grades || []).forEach((g) => faecher.add(g.fach));
+  const current = select.value;
+  select.innerHTML =
+    `<option value="">Allgemein</option>` +
+    [...faecher].sort().map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+  select.value = current && faecher.has(current) ? current : "";
+}
+
+function renderTutorMessage(m) {
+  const levelLabel = m.role === "assistant" ? TUTOR_LEVEL_LABELS[m.level] : null;
+  return `<div class="tutor-msg ${m.role}${m.pending ? " pending" : ""}">
+    ${levelLabel ? `<span class="tutor-level-tag">${levelLabel}</span>` : ""}
+    ${escapeHtml(m.content)}
+  </div>`;
+}
+
+function renderTutorChat(messages) {
+  const box = document.getElementById("tutor-chat");
+  if (!messages || messages.length === 0) {
+    box.innerHTML = `<div class="empty-state"><div class="display">Frag mich etwas 👋</div>Ich helfe dir beim Verstehen, Üben und Wiederholen.</div>`;
     return;
   }
-  const ziel = parseFloat(zielRaw);
+  box.innerHTML = messages.map(renderTutorMessage).join("");
+  box.scrollTop = box.scrollHeight;
+}
 
-  const relevant = fach === "__all__" ? state.grades || [] : (state.grades || []).filter((g) => g.fach === fach);
-  let weightedSum = 0, totalWeight = 0;
-  for (const g of relevant) {
-    weightedSum += g.note * g.gewichtung;
-    totalWeight += g.gewichtung;
+document.getElementById("tutor-level-segmented").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  haptic(6);
+  const wasActive = btn.classList.contains("active");
+  document.querySelectorAll("#tutor-level-segmented button").forEach((b) => b.classList.remove("active"));
+  tutorLevel = wasActive ? "" : btn.dataset.level;
+  if (tutorLevel) btn.classList.add("active");
+});
+
+async function sendTutorMessage(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed || tutorSending) return;
+  tutorSending = true;
+
+  const fach = document.getElementById("tutor-fach").value;
+  state.tutorHistory = [
+    ...(state.tutorHistory || []),
+    { role: "user", content: trimmed, level: tutorLevel, fach },
+    { role: "assistant", content: "…", pending: true },
+  ];
+  renderTutorChat(state.tutorHistory);
+
+  const result = await api("/api/tutor/chat", {
+    method: "POST",
+    body: JSON.stringify({ message: trimmed, level: tutorLevel, fach }),
+  });
+
+  state.tutorHistory = state.tutorHistory.filter((m) => !m.pending);
+  state.tutorHistory.push(
+    result.ok
+      ? { role: "assistant", content: result.reply, level: tutorLevel, fach }
+      : { role: "assistant", content: result.error || "Da ist etwas schiefgelaufen.", level: "" }
+  );
+  renderTutorChat(state.tutorHistory);
+  tutorSending = false;
+}
+
+document.getElementById("tutor-send").addEventListener("click", () => {
+  const input = document.getElementById("tutor-input");
+  sendTutorMessage(input.value);
+  input.value = "";
+});
+
+document.getElementById("tutor-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    document.getElementById("tutor-send").click();
   }
+});
 
-  // Note, die die nächste Arbeit (mit "gewichtung") haben müsste, damit der
-  // Schnitt aus allen bisherigen + dieser einen neuen Note genau "ziel" ergibt.
-  const needed = (ziel * (totalWeight + gewichtung) - weightedSum) / gewichtung;
+document.getElementById("tutor-suggestions").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  sendTutorMessage(btn.dataset.text);
+});
 
-  const isOberstufe = skala === "oberstufe";
-  const minVal = isOberstufe ? 0 : 1;
-  const maxVal = isOberstufe ? 15 : 6;
-  const unit = isOberstufe ? " Punkte" : "";
-
-  // Bei Punkten (0-15) ist höher besser, bei Noten (1-6) ist niedriger besser.
-  const unreachable = isOberstufe ? needed > maxVal : needed < minVal;
-  const alreadyThere = isOberstufe ? needed < minVal : needed > maxVal;
-
-  if (unreachable) {
-    resultEl.className = "calc-result warn";
-    resultEl.innerHTML = `Mit einer einzelnen Note ist ein Schnitt von <strong>${ziel}${isOberstufe ? " Punkten" : ""}</strong> nicht mehr erreichbar – selbst die bestmögliche Note reicht dafür nicht aus.`;
-  } else if (alreadyThere) {
-    resultEl.className = "calc-result";
-    resultEl.innerHTML = `Das hast du eigentlich schon geschafft – selbst mit der schlechtestmöglichen Note bleibst du bei ${ziel}${isOberstufe ? " Punkten" : ""} oder besser.`;
-  } else if (relevant.length === 0) {
-    resultEl.className = "calc-result";
-    resultEl.innerHTML = `Noch keine Noten für die Berechnung vorhanden – die nächste Note mit Gewichtung ${gewichtung}x müsste direkt <strong>${isOberstufe ? Math.ceil(needed) : Math.round(needed * 2) / 2}${unit}</strong> sein.`;
-  } else {
-    let safe;
-    if (isOberstufe) {
-      safe = Math.min(maxVal, Math.ceil(needed)); // ganze Punktzahl, mindestens so gut wie nötig
-      resultEl.innerHTML = `Du brauchst mindestens <strong>${safe} Punkte</strong> (Gewichtung ${gewichtung}x), um auf einen Schnitt von ${ziel} Punkten zu kommen.`;
-    } else {
-      safe = Math.max(minVal, Math.floor(needed * 2) / 2); // auf 0,5-Schritt abgerundet = mindestens so gut wie nötig
-      resultEl.innerHTML = `Du brauchst eine <strong>${safe}</strong> oder besser (Gewichtung ${gewichtung}x), um auf einen Schnitt von ${ziel} zu kommen.`;
-    }
-    resultEl.className = "calc-result";
-  }
+document.getElementById("tutor-clear-btn").addEventListener("click", async () => {
+  if (!confirm("Chatverlauf mit dem KI-Tutor wirklich löschen?")) return;
+  await api("/api/tutor/history", { method: "DELETE" });
+  state.tutorHistory = [];
+  renderTutorChat([]);
 });
 
 // ==================== Start ====================
