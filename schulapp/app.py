@@ -27,6 +27,7 @@ from pywebpush import webpush, WebPushException
 from cryptography.fernet import Fernet
 import pyotp
 import webuntis
+import requests
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "schulapp.db"
@@ -50,6 +51,11 @@ ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
 fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+
+# KI-Lernassistent
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "claude-sonnet-5")  # z.B. "claude-haiku-4-5-20251001" für günstiger/schneller
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 
 def try_untis_login(untis_username, untis_password):
@@ -157,6 +163,16 @@ def init_db():
             ip TEXT NOT NULL,
             scope TEXT NOT NULL DEFAULT 'user',
             attempt_time TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS tutor_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            role TEXT NOT NULL,              -- 'user' oder 'assistant'
+            content TEXT NOT NULL,
+            level TEXT,                      -- 'hinweis' | 'schritt' | 'erklaerung' | 'loesung' | ''
+            fach TEXT,
+            erstellt TEXT NOT NULL
         );
         """
     )
@@ -490,6 +506,100 @@ def log_notification(user_id, titel, text, typ):
     )
     conn.commit()
     conn.close()
+
+
+# ==================== KI-Lernassistent ====================
+
+TUTOR_LEVEL_INSTRUCTIONS = {
+    "hinweis": "Der/die Lernende möchte gerade nur einen kleinen 💡 Hinweis, keine Lösung. Gib einen kurzen Denkanstoß, keine Schritt-für-Schritt-Anleitung und keine fertige Antwort.",
+    "schritt": "Der/die Lernende möchte den 🧩 nächsten Schritt sehen, nicht die komplette Lösung. Erkläre nur, was als Nächstes zu tun ist, und lass den Rest offen.",
+    "erklaerung": "Der/die Lernende möchte eine 📖 Erklärung des Konzepts – verständlich, altersgerecht, mit einem kurzen Beispiel.",
+    "loesung": "Der/die Lernende möchte jetzt die ✅ vollständige Lösung sehen, inklusive Lösungsweg. Erkläre trotzdem kurz, wie man darauf kommt, statt nur das Ergebnis hinzuwerfen.",
+}
+
+
+def build_tutor_context(user, fach):
+    """Sammelt ein paar Signale aus den vorhandenen Nutzerdaten für Personalisierung."""
+    lines = []
+    if user.get("klasse"):
+        lines.append(f"Klasse: {user['klasse']}")
+    if fach:
+        lines.append(f"Aktuelles Fach: {fach}")
+
+    conn = get_db()
+    open_tasks = conn.execute(
+        "SELECT fach, text FROM tasks WHERE user_id=? AND erledigt=0 AND typ='hausaufgabe' "
+        "ORDER BY faellig IS NULL, faellig LIMIT 5",
+        (user["id"],),
+    ).fetchall()
+    weak = conn.execute(
+        "SELECT fach, AVG(note) avg_note, COUNT(*) c FROM grades WHERE user_id=? "
+        "GROUP BY fach HAVING c >= 2 ORDER BY avg_note DESC LIMIT 2",
+        (user["id"],),
+    ).fetchall()
+    conn.close()
+
+    if open_tasks:
+        lines.append("Offene Hausaufgaben: " + "; ".join(f"{t['fach']}: {t['text']}" for t in open_tasks))
+    if weak and get_setting(user["id"], "notenskala", "unterstufe") == "unterstufe":
+        # Bei der Notenskala 1-6 ist ein höherer Wert eine schlechtere Note.
+        lines.append("Fächer mit tendenziell schwächeren Noten: " + ", ".join(w["fach"] for w in weak))
+
+    return "\n".join(lines) if lines else "Keine weiteren Infos bekannt."
+
+
+def build_tutor_system_prompt(user, fach, level):
+    level_instruction = TUTOR_LEVEL_INSTRUCTIONS.get(
+        level, "Falls keine Hilfestufe angegeben ist: beginne mit einem Hinweis bzw. einer kurzen Erklärung "
+              "und biete an, bei Bedarf tiefer zu gehen."
+    )
+    return f"""Du bist der KI-Lernassistent in der Schulapp von {user.get('display_name') or 'einem Schüler/einer Schülerin'}. \
+Du bist ein freundlicher, geduldiger, persönlicher Tutor – kein gewöhnlicher Chatbot.
+
+PERSÖNLICHKEIT
+- Freundlich, motivierend, geduldig; natürlich, nicht roboterhaft
+- Verständlich und altersgerecht erklären, ohne unnötig lange Antworten
+- Fehler freundlich korrigieren, nichts erfinden – bei Unsicherheit ehrlich sagen
+
+LERNVERHALTEN
+Bei Aufgaben nicht sofort die Lösung geben. Erst verstehen, was der/die Lernende schon weiß, dann mit kleinen \
+Hinweisen arbeiten (z.B. "Was denkst du, wäre der erste Schritt?"), selbst nachdenken lassen und erst danach die \
+vollständige Lösung zeigen – außer die aktuelle Hilfestufe verlangt direkt danach (siehe unten).
+
+AKTUELLE HILFESTUFE
+{level_instruction}
+
+MOTIVATION
+Dezent und authentisch, nicht übertrieben (kein "Super! 🎉 Du bist unglaublich!"). Eher konkret: "Das war diesmal \
+deutlich besser." oder "Du hast den schwierigsten Schritt jetzt richtig gelöst."
+
+ANTWORTLÄNGE
+Kurz und gut lesbar, den/die Lernende nicht mit langen Antworten überfordern. Formeln/Code sauber in Markdown.
+
+KONTEXT ZUM NUTZER (nur verwenden, wenn gerade relevant – nicht aufdrängen)
+{build_tutor_context(user, fach)}"""
+
+
+def call_claude_tutor(system_prompt, history):
+    if not ANTHROPIC_API_KEY:
+        return None, "Der KI-Tutor ist noch nicht eingerichtet (ANTHROPIC_API_KEY fehlt in den Umgebungsvariablen)."
+    try:
+        resp = requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={"model": TUTOR_MODEL, "max_tokens": 1000, "system": system_prompt, "messages": history},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        return text.strip(), None
+    except requests.exceptions.RequestException as e:
+        return None, f"KI-Tutor gerade nicht erreichbar: {e}"
 
 
 # ==================== Scheduler-Jobs (laufen für ALLE Nutzer) ====================
@@ -1036,6 +1146,73 @@ def api_grade_delete(grade_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
+
+
+# ==================== KI-Lernassistent (Routen) ====================
+
+
+@app.route("/api/tutor/history", methods=["GET", "DELETE"])
+@login_required
+def api_tutor_history():
+    uid = session["user_id"]
+    if request.method == "DELETE":
+        conn = get_db()
+        conn.execute("DELETE FROM tutor_messages WHERE user_id=?", (uid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, role, content, level, fach, erstellt FROM tutor_messages WHERE user_id=? "
+        "ORDER BY id DESC LIMIT 40",
+        (uid,),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in reversed(rows)])
+
+
+@app.route("/api/tutor/chat", methods=["POST"])
+@login_required
+def api_tutor_chat():
+    data = request.get_json()
+    message = (data.get("message") or "").strip()
+    level = data.get("level") or ""
+    fach = (data.get("fach") or "").strip()
+    if not message:
+        return jsonify({"ok": False, "error": "Leere Nachricht."}), 400
+
+    user = current_user()
+    uid = user["id"]
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO tutor_messages (user_id, role, content, level, fach, erstellt) VALUES (?,?,?,?,?,?)",
+        (uid, "user", message, level, fach, dt.datetime.now(TZ).isoformat()),
+    )
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT role, content FROM tutor_messages WHERE user_id=? ORDER BY id DESC LIMIT 16", (uid,)
+    ).fetchall()
+    conn.close()
+    history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+    system_prompt = build_tutor_system_prompt(user, fach, level)
+    reply, error = call_claude_tutor(system_prompt, history)
+
+    if error:
+        return jsonify({"ok": False, "error": error})
+
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO tutor_messages (user_id, role, content, level, fach, erstellt) VALUES (?,?,?,?,?,?)",
+        (uid, "assistant", reply, level, fach, dt.datetime.now(TZ).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify({"ok": True, "reply": reply})
 
 
 init_db()
