@@ -384,20 +384,6 @@ a { color: inherit; }
 }
 .time-chip button { background: none; color: var(--text-muted); font-size: 14px; line-height: 1; }
 
-/* ---------- Notenrechner ---------- */
-
-.calc-result {
-  margin-top: 14px;
-  padding: 14px;
-  border-radius: 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  font-size: 14px;
-  line-height: 1.5;
-}
-.calc-result strong { font-family: 'JetBrains Mono', monospace; font-size: 16px; }
-.calc-result.warn { border-color: var(--text); border-style: dashed; }
-
 /* ---------- Bottom Nav ---------- */
 
 .tabbar {
@@ -439,6 +425,72 @@ a { color: inherit; }
 .notif-item .text { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
 .notif-item .time { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
 .notif-item.unread .title::before { content: "●"; color: var(--text); margin-right: 6px; font-size: 8px; }
+
+/* ---------- KI-Lernassistent ---------- */
+
+.tutor-chat {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: 4px 2px;
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tutor-msg {
+  max-width: 86%;
+  padding: 12px 14px;
+  border-radius: 16px;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.tutor-msg.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-bottom-right-radius: 4px;
+}
+.tutor-msg.assistant {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 4px;
+}
+.tutor-msg.pending { opacity: 0.6; }
+.tutor-msg .tutor-level-tag {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  margin-bottom: 4px;
+}
+
+.tutor-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.tutor-suggestions button {
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tutor-input-row { display: flex; gap: 8px; align-items: center; }
+.tutor-input-row input {
+  flex: 1;
+  padding: 12px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+}
+.tutor-input-row .icon-btn { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); flex-shrink: 0; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
