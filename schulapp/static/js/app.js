@@ -680,6 +680,13 @@ function renderNoten(grades) {
   document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–";
   document.getElementById("tile-anzahl-noten").textContent = grades.length;
 
+  const calcFachEl = document.getElementById("calc-fach");
+  const prevCalcFach = calcFachEl.value;
+  calcFachEl.innerHTML =
+    `<option value="__all__">Gesamtschnitt</option>` +
+    Object.keys(bySubject).sort().map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+  if ([...calcFachEl.options].some((o) => o.value === prevCalcFach)) calcFachEl.value = prevCalcFach;
+
   const bySubjectEl = document.getElementById("grades-by-subject");
   const subjects = Object.keys(bySubject).sort();
   if (subjects.length === 0) {
@@ -728,6 +735,66 @@ function renderNoten(grades) {
     });
   }
 }
+
+// ==================== Notenrechner ====================
+
+document.getElementById("calc-btn").addEventListener("click", () => {
+  const resultEl = document.getElementById("calc-result");
+  const skala = state.settings.notenskala || "unterstufe";
+  const fach = document.getElementById("calc-fach").value;
+  const zielRaw = document.getElementById("calc-ziel").value;
+  const gewichtung = parseFloat(document.getElementById("calc-gewichtung").value) || 1;
+
+  resultEl.style.display = "block";
+
+  if (!zielRaw) {
+    resultEl.className = "calc-result warn";
+    resultEl.innerHTML = "Bitte einen Zielschnitt eingeben.";
+    return;
+  }
+  const ziel = parseFloat(zielRaw);
+
+  const relevant = fach === "__all__" ? state.grades || [] : (state.grades || []).filter((g) => g.fach === fach);
+  let weightedSum = 0, totalWeight = 0;
+  for (const g of relevant) {
+    weightedSum += g.note * g.gewichtung;
+    totalWeight += g.gewichtung;
+  }
+
+  // Note, die die nächste Arbeit (mit "gewichtung") haben müsste, damit der
+  // Schnitt aus allen bisherigen + dieser einen neuen Note genau "ziel" ergibt.
+  const needed = (ziel * (totalWeight + gewichtung) - weightedSum) / gewichtung;
+
+  const isOberstufe = skala === "oberstufe";
+  const minVal = isOberstufe ? 0 : 1;
+  const maxVal = isOberstufe ? 15 : 6;
+  const unit = isOberstufe ? " Punkte" : "";
+
+  // Bei Punkten (0-15) ist höher besser, bei Noten (1-6) ist niedriger besser.
+  const unreachable = isOberstufe ? needed > maxVal : needed < minVal;
+  const alreadyThere = isOberstufe ? needed < minVal : needed > maxVal;
+
+  if (unreachable) {
+    resultEl.className = "calc-result warn";
+    resultEl.innerHTML = `Mit einer einzelnen Note ist ein Schnitt von <strong>${ziel}${isOberstufe ? " Punkten" : ""}</strong> nicht mehr erreichbar – selbst die bestmögliche Note reicht dafür nicht aus.`;
+  } else if (alreadyThere) {
+    resultEl.className = "calc-result";
+    resultEl.innerHTML = `Das hast du eigentlich schon geschafft – selbst mit der schlechtestmöglichen Note bleibst du bei ${ziel}${isOberstufe ? " Punkten" : ""} oder besser.`;
+  } else if (relevant.length === 0) {
+    resultEl.className = "calc-result";
+    resultEl.innerHTML = `Noch keine Noten für die Berechnung vorhanden – die nächste Note mit Gewichtung ${gewichtung}x müsste direkt <strong>${isOberstufe ? Math.ceil(needed) : Math.round(needed * 2) / 2}${unit}</strong> sein.`;
+  } else {
+    let safe;
+    if (isOberstufe) {
+      safe = Math.min(maxVal, Math.ceil(needed)); // ganze Punktzahl, mindestens so gut wie nötig
+      resultEl.innerHTML = `Du brauchst mindestens <strong>${safe} Punkte</strong> (Gewichtung ${gewichtung}x), um auf einen Schnitt von ${ziel} Punkten zu kommen.`;
+    } else {
+      safe = Math.max(minVal, Math.floor(needed * 2) / 2); // auf 0,5-Schritt abgerundet = mindestens so gut wie nötig
+      resultEl.innerHTML = `Du brauchst eine <strong>${safe}</strong> oder besser (Gewichtung ${gewichtung}x), um auf einen Schnitt von ${ziel} zu kommen.`;
+    }
+    resultEl.className = "calc-result";
+  }
+});
 
 // ==================== Start ====================
 
