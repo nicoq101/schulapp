@@ -81,7 +81,7 @@ document.getElementById("schule-subnav").addEventListener("click", (e) => {
 // ==================== Daten laden ====================
 
 async function loadAll() {
-  const [timetable, exams, tasks, settings, notifications, grades, tutorHistory] = await Promise.all([
+  const [timetable, exams, tasks, settings, notifications, grades, tutorHistory, billing] = await Promise.all([
     api("/api/timetable"),
     api("/api/exams"),
     api("/api/tasks"),
@@ -89,8 +89,9 @@ async function loadAll() {
     api("/api/notifications"),
     api("/api/grades"),
     api("/api/tutor/history"),
+    api("/api/billing/status"),
   ]);
-  state = { timetable, exams, tasks, settings, notifications, grades, tutorHistory };
+  state = { timetable, exams, tasks, settings, notifications, grades, tutorHistory, billing };
   renderAll();
 }
 
@@ -105,6 +106,7 @@ function renderAll() {
   renderNoten(state.grades || []);
   populateTutorFaecher();
   renderTutorChat(state.tutorHistory || []);
+  renderBilling();
 }
 
 // ==================== Begrüßung ====================
@@ -610,8 +612,17 @@ document.querySelectorAll("#auth-mode button").forEach((btn) => {
     btn.classList.add("active");
     authMode = btn.dataset.mode;
     document.getElementById("register-fields").style.display = authMode === "register" ? "block" : "none";
+    document.getElementById("pw-hint").style.display = authMode === "register" ? "block" : "none";
     document.getElementById("auth-submit").textContent = authMode === "register" ? "Account erstellen" : "Anmelden";
   });
+});
+
+function isPasswordValid(pw) {
+  return pw.length >= 8 && /[^A-Za-z0-9]/.test(pw);
+}
+
+document.getElementById("auth-password").addEventListener("input", (e) => {
+  document.getElementById("pw-hint").classList.toggle("ok", isPasswordValid(e.target.value));
 });
 
 document.getElementById("untis-toggle").addEventListener("click", () => {
@@ -629,6 +640,13 @@ document.getElementById("auth-submit").addEventListener("click", async () => {
     username: document.getElementById("auth-username").value.trim(),
     password: document.getElementById("auth-password").value,
   };
+
+  if (authMode === "register" && !isPasswordValid(body.password)) {
+    errorBox.textContent = "Passwort braucht mind. 8 Zeichen und ein Sonderzeichen.";
+    errorBox.classList.add("visible");
+    return;
+  }
+
   if (authMode === "register") {
     body.display_name = document.getElementById("auth-display-name").value.trim();
     if (document.getElementById("untis-toggle").classList.contains("on")) {
@@ -855,6 +873,56 @@ document.getElementById("tutor-clear-btn").addEventListener("click", async () =>
   state.tutorHistory = [];
   renderTutorChat([]);
 });
+
+// ==================== Abo / Zahlungen ====================
+
+function renderBilling() {
+  const active = !!(state.billing && state.billing.active);
+
+  const paywall = document.getElementById("tutor-paywall");
+  const chatUi = document.getElementById("tutor-chat-ui");
+  if (paywall && chatUi) {
+    paywall.style.display = active ? "none" : "block";
+    chatUi.style.display = active ? "block" : "none";
+  }
+
+  const statusText = document.getElementById("billing-status-text");
+  const actionBtn = document.getElementById("billing-action-btn");
+  if (statusText && actionBtn) {
+    statusText.textContent = active ? "Premium aktiv – KI-Tutor freigeschaltet" : "Kostenlos – KI-Tutor gesperrt";
+    actionBtn.textContent = active ? "Abo verwalten" : "Upgraden";
+  }
+}
+
+async function startCheckout() {
+  const result = await api("/api/billing/checkout", { method: "POST" });
+  if (result.ok) {
+    window.location.href = result.url;
+  } else {
+    alert(result.error || "Checkout konnte nicht gestartet werden.");
+  }
+}
+
+document.getElementById("tutor-upgrade-btn").addEventListener("click", startCheckout);
+
+document.getElementById("billing-action-btn").addEventListener("click", async () => {
+  if (state.billing && state.billing.active) {
+    const result = await api("/api/billing/portal", { method: "POST" });
+    if (result.ok) window.location.href = result.url;
+    else alert(result.error || "Abo-Verwaltung konnte nicht geöffnet werden.");
+  } else {
+    startCheckout();
+  }
+});
+
+// Nach Rückkehr von Stripe Checkout kurz den Billing-Status neu laden
+if (new URLSearchParams(window.location.search).get("billing") === "success") {
+  window.history.replaceState({}, "", "/");
+  setTimeout(async () => {
+    state.billing = await api("/api/billing/status");
+    renderBilling();
+  }, 1500);
+}
 
 // ==================== Start ====================
 
