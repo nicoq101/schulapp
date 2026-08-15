@@ -303,6 +303,12 @@ a { color: inherit; }
   color: var(--text);
   font-family: inherit;
   font-size: 14px;
+  transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.field input:focus, .field select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .btn-primary {
@@ -515,16 +521,59 @@ a { color: inherit; }
 }
 #auth-screen.hidden { display: none; }
 
+.auth-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 26px;
+  width: 100%;
+  max-width: 380px;
+  position: relative;
+}
+
+.auth-glow {
+  position: absolute;
+  top: -120px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, var(--accent-glow) 0%, transparent 72%);
+  filter: blur(30px);
+  pointer-events: none;
+  z-index: 0;
+  animation: auth-pulse 6s ease-in-out infinite;
+}
+@keyframes auth-pulse {
+  0%, 100% { opacity: 0.55; transform: translateX(-50%) scale(1); }
+  50% { opacity: 1; transform: translateX(-50%) scale(1.12); }
+}
+
+.auth-wordmark {
+  position: relative;
+  z-index: 1;
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.34em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-shadow: 0 0 20px var(--accent-glow), 0 0 44px var(--accent-glow);
+}
+
 .auth-box {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 380px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 22px;
-  padding: 28px 24px;
+  border-radius: 26px;
+  padding: 30px 26px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 }
 .auth-box h1 { font-size: 26px; margin-bottom: 6px; }
-.auth-sub { color: var(--text-muted); font-size: 13px; margin: 0 0 20px; }
+.auth-sub { color: var(--text-muted); font-size: 13px; margin: 0 0 22px; text-align: center; }
 .auth-error {
   display: none;
   background: var(--accent-soft);
@@ -535,3 +584,6 @@ a { color: inherit; }
   margin-bottom: 14px;
 }
 .auth-error.visible { display: block; }
+
+.pw-hint { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+.pw-hint.ok { color: #7CF5A0; }
