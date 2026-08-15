@@ -23,13 +23,15 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request, send_from_directory, render_template, session
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from apscheduler.schedulers.background import BackgroundScheduler
 from pywebpush import webpush, WebPushException
 from cryptography.fernet import Fernet
 import pyotp
 import webuntis
 import requests
-import stripe
+import hmac
+import hashlib
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "schulapp.db"
@@ -53,18 +55,22 @@ ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
 fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+if not fernet:
+    print("WARNUNG: ENCRYPTION_KEY ist nicht gesetzt - WebUntis-Verknüpfung ist deaktiviert, "
+          "bis die Variable bei Render eingetragen wird.")
 
 # KI-Lernassistent
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "gemini-flash-latest")  # Alias, zeigt immer auf die neueste Flash-Version
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Zahlungen (Stripe)
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+# Zahlungen (Lemon Squeezy – Merchant of Record: übernimmt Steuer/USt selbst)
+LEMONSQUEEZY_API_KEY = os.environ.get("LEMONSQUEEZY_API_KEY", "")
+LEMONSQUEEZY_STORE_ID = os.environ.get("LEMONSQUEEZY_STORE_ID", "")
+LEMONSQUEEZY_VARIANT_ID = os.environ.get("LEMONSQUEEZY_VARIANT_ID", "")
+LEMONSQUEEZY_WEBHOOK_SECRET = os.environ.get("LEMONSQUEEZY_WEBHOOK_SECRET", "")
+LEMONSQUEEZY_API_URL = "https://api.lemonsqueezy.com/v1"
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
-stripe.api_key = STRIPE_SECRET_KEY
 
 
 def try_untis_login(untis_username, untis_password):
@@ -80,6 +86,11 @@ def try_untis_login(untis_username, untis_password):
         return False, str(e)
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
+# Render sitzt als genau 1 Reverse-Proxy davor. ProxyFix sorgt dafür, dass
+# request.remote_addr die echte, von Render gesetzte Client-IP ist - und NICHT
+# ein von Angreifer:innen selbst mitgeschickter X-Forwarded-For-Wert (sonst
+# ließe sich die Login-Sperre unten durch eine gefälschte IP pro Versuch umgehen).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 app.secret_key = SECRET_KEY
 app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
@@ -200,8 +211,10 @@ def migrate_billing_columns(conn):
     """Ergänzt Stripe/Abo-Spalten in 'users', falls die Tabelle schon vor
     Einführung der Bezahlfunktion existiert hat."""
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "lemonsqueezy_customer_id" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN lemonsqueezy_customer_id TEXT")
     if "stripe_customer_id" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+        conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")  # ungenutztes Überbleibsel, schadet nicht
     if "subscription_status" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'inactive'")
     if "subscription_current_period_end" not in cols:
@@ -254,22 +267,27 @@ def migrate_legacy_data(conn):
 MAX_ATTEMPTS = 5
 LOCKOUT_HOURS = 24
 
+# Wird verwendet, wenn ein Login-Versuch einen nicht existierenden Nutzernamen betrifft -
+# so dauert check_password_hash() in JEDEM Fall gleich lang (echter Hash oder Dummy-Hash),
+# und die Antwortzeit verrät nicht per Timing-Unterschied, ob der Nutzername existiert.
+DUMMY_PASSWORD_HASH = generate_password_hash("dummy-password-fuer-konstante-timing")
+
 
 def get_client_ip():
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    # request.remote_addr wird jetzt bereits von ProxyFix korrekt gesetzt.
     return request.remote_addr or "unknown"
 
 
-def is_locked_out(ip, scope="user"):
+def is_locked_out(ip, scope="user", max_attempts=None, window_hours=None):
+    max_attempts = max_attempts if max_attempts is not None else MAX_ATTEMPTS
+    window_hours = window_hours if window_hours is not None else LOCKOUT_HOURS
     conn = get_db()
-    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=LOCKOUT_HOURS)).isoformat()
+    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=window_hours)).isoformat()
     count = conn.execute(
         "SELECT COUNT(*) c FROM failed_logins WHERE ip = ? AND scope = ? AND attempt_time > ?", (ip, scope, cutoff)
     ).fetchone()["c"]
     conn.close()
-    return count >= MAX_ATTEMPTS
+    return count >= max_attempts
 
 
 def record_failed_login(ip, scope="user"):
@@ -293,6 +311,10 @@ def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
+            return jsonify({"error": "not_authenticated"}), 401
+        if current_user() is None:
+            # Account wurde z.B. von einem Admin gelöscht, während die Session noch gültig war.
+            session.clear()
             return jsonify({"error": "not_authenticated"}), 401
         return f(*args, **kwargs)
 
@@ -536,7 +558,7 @@ def log_notification(user_id, titel, text, typ):
 
 
 def user_has_active_subscription(user):
-    return user["subscription_status"] in ("active", "trialing")
+    return user["subscription_status"] in ("active", "on_trial")
 
 
 @app.route("/api/billing/status")
@@ -553,78 +575,99 @@ def api_billing_status():
 @app.route("/api/billing/checkout", methods=["POST"])
 @login_required
 def api_billing_checkout():
-    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+    if not (LEMONSQUEEZY_API_KEY and LEMONSQUEEZY_STORE_ID and LEMONSQUEEZY_VARIANT_ID):
         return jsonify({"ok": False, "error": "Zahlungen sind noch nicht eingerichtet."}), 400
 
-    user = current_user()
-    customer_id = user["stripe_customer_id"]
-    try:
-        if not customer_id:
-            customer = stripe.Customer.create(metadata={"user_id": user["id"], "username": user["username"]})
-            customer_id = customer.id
-            conn = get_db()
-            conn.execute("UPDATE users SET stripe_customer_id=? WHERE id=?", (customer_id, user["id"]))
-            conn.commit()
-            conn.close()
+    ip = get_client_ip()
+    if is_locked_out(ip, "checkout", max_attempts=10, window_hours=1):
+        return jsonify({"ok": False, "error": "Zu viele Anfragen. Bitte später erneut versuchen."}), 429
+    record_failed_login(ip, "checkout")
 
-        checkout_session = stripe.checkout.Session.create(
-            customer=customer_id,
-            mode="subscription",
-            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
-            success_url=f"{APP_BASE_URL}/?billing=success",
-            cancel_url=f"{APP_BASE_URL}/?billing=cancel",
-            metadata={"user_id": user["id"]},
+    user = current_user()
+    try:
+        resp = requests.post(
+            f"{LEMONSQUEEZY_API_URL}/checkouts",
+            headers={
+                "Authorization": f"Bearer {LEMONSQUEEZY_API_KEY}",
+                "Content-Type": "application/vnd.api+json",
+                "Accept": "application/vnd.api+json",
+            },
+            json={
+                "data": {
+                    "type": "checkouts",
+                    "attributes": {
+                        # user_id landet als custom_data in jedem folgenden Webhook-Event -
+                        # so lässt sich das Abo direkt einem Account zuordnen, ganz ohne
+                        # vorherige Kund:innen-Anlage wie bei Stripe.
+                        "checkout_data": {"custom": {"user_id": str(user["id"])}},
+                        "product_options": {"redirect_url": f"{APP_BASE_URL}/?billing=success"},
+                    },
+                    "relationships": {
+                        "store": {"data": {"type": "stores", "id": str(LEMONSQUEEZY_STORE_ID)}},
+                        "variant": {"data": {"type": "variants", "id": str(LEMONSQUEEZY_VARIANT_ID)}},
+                    },
+                }
+            },
+            timeout=15,
         )
+        resp.raise_for_status()
+        url = resp.json()["data"]["attributes"]["url"]
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
-    return jsonify({"ok": True, "url": checkout_session.url})
+    return jsonify({"ok": True, "url": url})
 
 
 @app.route("/api/billing/portal", methods=["POST"])
 @login_required
 def api_billing_portal():
     user = current_user()
-    if not user["stripe_customer_id"]:
+    if not user["lemonsqueezy_customer_id"]:
         return jsonify({"ok": False, "error": "Noch kein Abo vorhanden."}), 400
     try:
-        portal = stripe.billing_portal.Session.create(customer=user["stripe_customer_id"], return_url=f"{APP_BASE_URL}/")
+        resp = requests.get(
+            f"{LEMONSQUEEZY_API_URL}/customers/{user['lemonsqueezy_customer_id']}",
+            headers={"Authorization": f"Bearer {LEMONSQUEEZY_API_KEY}", "Accept": "application/vnd.api+json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        # Die Portal-URL ist signiert und läuft nach 24h ab - deshalb hier live abrufen,
+        # statt sie zu speichern.
+        url = resp.json()["data"]["attributes"]["urls"]["customer_portal"]
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True, "url": portal.url})
+    return jsonify({"ok": True, "url": url})
 
 
-@app.route("/webhook/stripe", methods=["POST"])
-def stripe_webhook():
+@app.route("/webhook/lemonsqueezy", methods=["POST"])
+def lemonsqueezy_webhook():
     payload = request.data
-    sig_header = request.headers.get("Stripe-Signature", "")
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except (ValueError, stripe.error.SignatureVerificationError):
+    sig_header = request.headers.get("X-Signature", "")
+    expected = hmac.new(LEMONSQUEEZY_WEBHOOK_SECRET.encode(), payload, hashlib.sha256).hexdigest()
+    if not LEMONSQUEEZY_WEBHOOK_SECRET or not hmac.compare_digest(expected, sig_header):
         return jsonify({"error": "invalid signature"}), 400
 
-    obj = event["data"]["object"]
-    etype = event["type"]
+    event = request.get_json(silent=True) or {}
+    meta = event.get("meta", {})
+    event_name = meta.get("event_name", "")
+    user_id = (meta.get("custom_data") or {}).get("user_id")
+    attrs = event.get("data", {}).get("attributes", {})
 
-    def set_status_by_customer(customer_id, status, period_end=None):
+    data_type = event.get("data", {}).get("type", "")
+    # Nur echte Subscription-Objekte verarbeiten - subscription_payment_* & Co. liefern
+    # z.B. "subscription-invoices" mit anderem Attribut-Format (status: "paid" statt "active").
+    if event_name.startswith("subscription_") and data_type == "subscriptions" and user_id:
+        status = attrs.get("status", "inactive")
+        period_end = attrs.get("renews_at") or attrs.get("ends_at")
+        customer_id = attrs.get("customer_id")
         conn = get_db()
-        if period_end:
-            conn.execute(
-                "UPDATE users SET subscription_status=?, subscription_current_period_end=? WHERE stripe_customer_id=?",
-                (status, period_end, customer_id),
-            )
-        else:
-            conn.execute("UPDATE users SET subscription_status=? WHERE stripe_customer_id=?", (status, customer_id))
+        conn.execute(
+            "UPDATE users SET subscription_status=?, subscription_current_period_end=?, "
+            "lemonsqueezy_customer_id=COALESCE(?, lemonsqueezy_customer_id) WHERE id=?",
+            (status, period_end, str(customer_id) if customer_id else None, user_id),
+        )
         conn.commit()
         conn.close()
-
-    if etype in ("customer.subscription.updated", "customer.subscription.created"):
-        period_end = dt.datetime.fromtimestamp(obj["current_period_end"], TZ).isoformat()
-        set_status_by_customer(obj["customer"], obj["status"], period_end)
-    elif etype == "customer.subscription.deleted":
-        set_status_by_customer(obj["customer"], "inactive")
-    elif etype == "checkout.session.completed" and obj.get("customer"):
-        set_status_by_customer(obj["customer"], "active")
 
     return jsonify({"received": True})
 
@@ -868,6 +911,7 @@ def validate_password(pw):
 
 @app.route("/api/register", methods=["POST"])
 def api_register():
+    ip = get_client_ip()
     data = request.get_json()
     username = data.get("username", "").strip()
     password = data.get("password", "")
@@ -883,6 +927,15 @@ def api_register():
         return jsonify({"ok": False, "error": pw_err}), 400
 
     has_untis = bool(untis_username and untis_password)
+
+    if has_untis and not fernet:
+        # Ohne ENCRYPTION_KEY würde das WebUntis-Passwort im Klartext in der DB landen -
+        # lieber die Verknüpfung verweigern, als das stillschweigend zu tun.
+        return jsonify({
+            "ok": False,
+            "error": "WebUntis-Verknüpfung ist serverseitig noch nicht sicher eingerichtet "
+                     "(ENCRYPTION_KEY fehlt). Bitte ohne WebUntis registrieren oder Adminstrator:in fragen.",
+        }), 400
 
     conn = get_db()
     exists = conn.execute("SELECT 1 FROM users WHERE lower(username) = lower(?)", (username,)).fetchone()
@@ -900,9 +953,18 @@ def api_register():
     conn.close()
 
     if has_untis:
+        # Eigenes Rate-Limit für WebUntis-Prüfungen: sonst ließe sich die Registrierung
+        # missbrauchen, um fremde WebUntis-Passwörter unbegrenzt durchzuprobieren.
+        if is_locked_out(ip, "untis_check"):
+            return jsonify({
+                "ok": False,
+                "error": f"Zu viele Fehlversuche. Bitte in {LOCKOUT_HOURS} Stunden erneut probieren.",
+            }), 429
         ok, err = try_untis_login(untis_username, untis_password)
         if not ok:
+            record_failed_login(ip, "untis_check")
             return jsonify({"ok": False, "error": f"WebUntis-Zugangsdaten konnten nicht bestätigt werden. ({err})"}), 400
+        clear_failed_logins(ip, "untis_check")
 
     conn = get_db()
 
@@ -938,7 +1000,8 @@ def api_login():
     row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     conn.close()
 
-    if not row or not check_password_hash(row["password_hash"], password):
+    password_ok = check_password_hash(row["password_hash"] if row else DUMMY_PASSWORD_HASH, password)
+    if not row or not password_ok:
         record_failed_login(ip, "user")
         return jsonify({"ok": False, "error": "Benutzername oder Passwort falsch."}), 401
 
@@ -954,6 +1017,28 @@ def api_logout():
     return jsonify({"ok": True})
 
 
+@app.route("/api/password", methods=["POST"])
+@login_required
+def api_change_password():
+    data = request.get_json()
+    old_password = data.get("old_password", "")
+    new_password = data.get("new_password", "")
+
+    user = current_user()
+    if not check_password_hash(user["password_hash"], old_password):
+        return jsonify({"ok": False, "error": "Aktuelles Passwort ist falsch."}), 400
+
+    pw_ok, pw_err = validate_password(new_password)
+    if not pw_ok:
+        return jsonify({"ok": False, "error": pw_err}), 400
+
+    conn = get_db()
+    conn.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(new_password), user["id"]))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/me")
 def api_me():
     if "user_id" not in session:
@@ -966,6 +1051,26 @@ def api_me():
 
 
 # ==================== API-Routen (Daten) ====================
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self';"
+    )
+    return response
 
 
 @app.route("/")
@@ -1085,7 +1190,7 @@ def admin_delete(user_id):
     if not admin_authorized():
         return jsonify({"error": "unauthorized"}), 403
     conn = get_db()
-    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades"):
+    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades", "tutor_messages"):
         conn.execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
@@ -1317,6 +1422,20 @@ def api_tutor_history():
     return jsonify([dict(r) for r in reversed(rows)])
 
 
+TUTOR_RATE_LIMIT_PER_HOUR = 30
+
+
+def tutor_rate_limited(user_id):
+    conn = get_db()
+    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=1)).isoformat()
+    count = conn.execute(
+        "SELECT COUNT(*) c FROM tutor_messages WHERE user_id=? AND role='user' AND erstellt > ?",
+        (user_id, cutoff),
+    ).fetchone()["c"]
+    conn.close()
+    return count >= TUTOR_RATE_LIMIT_PER_HOUR
+
+
 @app.route("/api/tutor/chat", methods=["POST"])
 @login_required
 def api_tutor_chat():
@@ -1331,6 +1450,9 @@ def api_tutor_chat():
     if not user_has_active_subscription(user):
         return jsonify({"ok": False, "paywall": True, "error": "Der KI-Tutor ist Teil des Premium-Abos."}), 402
     uid = user["id"]
+
+    if tutor_rate_limited(uid):
+        return jsonify({"ok": False, "error": f"Maximal {TUTOR_RATE_LIMIT_PER_HOUR} Nachrichten pro Stunde. Bitte gleich nochmal versuchen."}), 429
 
     conn = get_db()
     conn.execute(
