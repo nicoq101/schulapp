@@ -90,7 +90,7 @@
 
   <div class="topbar">
     <h1><span class="live-dot"></span>Accounts <span class="count-badge mono" id="user-count">…</span></h1>
-    <button class="btn-logout" onclick="logout()">Abmelden</button>
+    <button class="btn-logout" id="logout-btn">Abmelden</button>
   </div>
 
   <div class="section-title">🔒 Gesperrte IPs</div>
@@ -111,97 +111,6 @@
     </table>
   </div>
 
-<script>
-const REFRESH_MS = 10000;
-let statusCache = {}; // id -> letzter geprüfter Status (bleibt beim Neurendern erhalten)
-
-async function loadUsers() {
-  const res = await fetch("/admin/users");
-  if (res.status === 403) { location.reload(); return; }
-  const users = await res.json();
-  document.getElementById("user-count").textContent = users.length;
-
-  const body = document.getElementById("users-body");
-  if (users.length === 0) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="9">Noch keine Accounts.</td></tr>`;
-    return;
-  }
-  body.innerHTML = users.map((u) => {
-    const cached = statusCache[u.id];
-    let badgeClass = "none";
-    let statusText = "kein WebUntis";
-    if (u.untis_username) {
-      if (cached) {
-        badgeClass = cached.ok ? "ok" : "fail";
-        statusText = cached.ok ? "funktioniert" : (cached.error || "Fehler");
-      } else {
-        badgeClass = "neutral";
-        statusText = "noch nicht geprüft";
-      }
-    }
-    return `<tr id="row-${u.id}">
-      <td class="mono">${u.username}</td><td>${u.display_name}</td><td class="mono">${u.untis_username || "–"}</td>
-      <td class="mono">${u.tasks}</td><td class="mono">${u.grades}</td><td class="mono">${u.push}</td>
-      <td class="mono">${u.created_at.slice(0,10)}</td>
-      <td><span class="badge ${badgeClass}" id="status-${u.id}">${statusText}</span></td>
-      <td>
-        <button onclick="check(${u.id})">WebUntis prüfen</button>
-        <button onclick="del(${u.id}, '${u.username}')">Löschen</button>
-      </td>
-    </tr>`;
-  }).join("");
-}
-
-async function check(id) {
-  const el = document.getElementById("status-" + id);
-  el.textContent = "prüfe …";
-  el.className = "badge neutral";
-  const res = await fetch(`/admin/check/${id}`);
-  const data = await res.json();
-  statusCache[id] = data;
-  el.textContent = data.ok ? "funktioniert" : (data.error || "Fehler");
-  el.className = "badge " + (data.ok ? "ok" : "fail");
-}
-
-async function del(id, name) {
-  if (!confirm(`Account "${name}" wirklich komplett löschen?`)) return;
-  await fetch(`/admin/delete/${id}`, { method: "POST" });
-  delete statusCache[id];
-  loadUsers();
-}
-
-async function loadLockouts() {
-  const res = await fetch("/admin/lockouts");
-  const data = await res.json();
-  const body = document.getElementById("lockout-body");
-  if (data.length === 0) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="5">Aktuell keine gesperrten IPs.</td></tr>`;
-    return;
-  }
-  body.innerHTML = data.map((l) => `<tr>
-    <td class="mono">${l.ip}</td><td>${l.scope}</td><td class="mono">${l.c}</td><td class="mono">${l.last.slice(0,16).replace("T"," ")}</td>
-    <td><button onclick="unlock('${l.ip}', '${l.scope}')">Entsperren</button></td>
-  </tr>`).join("");
-}
-
-async function unlock(ip, scope) {
-  await fetch("/admin/unlock", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ip, scope }),
-  });
-  loadLockouts();
-}
-
-async function logout() {
-  await fetch("/admin/logout", { method: "POST" });
-  location.reload();
-}
-
-loadUsers();
-loadLockouts();
-setInterval(loadUsers, REFRESH_MS);
-setInterval(loadLockouts, REFRESH_MS);
-</script>
+<script src="/static/js/admin.js"></script>
 </body>
 </html>
