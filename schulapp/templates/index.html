@@ -13,8 +13,10 @@
 </head>
 <body>
 <div id="auth-screen">
-  <div class="auth-box">
-    <h1 class="display">Schulapp</h1>
+  <div class="auth-wrap">
+    <div class="auth-glow"></div>
+    <div class="auth-wordmark">Schulapp</div>
+    <div class="auth-box">
     <p class="auth-sub">Melde dich an oder erstelle einen Account.</p>
 
     <div class="segmented" id="auth-mode" style="margin-bottom: 20px;">
@@ -33,6 +35,7 @@
       <input type="password" id="auth-password" placeholder="Dein App-Passwort" />
       <div class="pw-hint" id="pw-hint" style="display:none;">Mind. 8 Zeichen und ein Sonderzeichen</div>
     </div>
+
 
     <div id="register-fields">
       <div class="field">
@@ -56,6 +59,7 @@
     </div>
 
     <button class="btn-primary" id="auth-submit">Anmelden</button>
+    </div>
   </div>
 </div>
 
