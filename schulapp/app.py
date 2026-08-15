@@ -14,6 +14,7 @@ Einrichtung: siehe README.md im selben Ordner.
 
 import os
 import json
+import re
 import sqlite3
 import datetime as dt
 from pathlib import Path
@@ -28,6 +29,7 @@ from cryptography.fernet import Fernet
 import pyotp
 import webuntis
 import requests
+import stripe
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "schulapp.db"
@@ -56,6 +58,13 @@ fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "gemini-flash-latest")  # Alias, zeigt immer auf die neueste Flash-Version
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+# Zahlungen (Stripe)
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
+stripe.api_key = STRIPE_SECRET_KEY
 
 
 def try_untis_login(untis_username, untis_password):
@@ -182,8 +191,22 @@ def init_db():
     # --- Migration: falls eine ältere Version dieser App (ohne Login) schon
     # Daten angelegt hat, diese automatisch dem ersten Nutzer zuordnen. ---
     migrate_legacy_data(conn)
+    migrate_billing_columns(conn)
 
     conn.close()
+
+
+def migrate_billing_columns(conn):
+    """Ergänzt Stripe/Abo-Spalten in 'users', falls die Tabelle schon vor
+    Einführung der Bezahlfunktion existiert hat."""
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if "stripe_customer_id" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")
+    if "subscription_status" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'inactive'")
+    if "subscription_current_period_end" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN subscription_current_period_end TEXT")
+    conn.commit()
 
 
 def migrate_legacy_data(conn):
@@ -509,6 +532,103 @@ def log_notification(user_id, titel, text, typ):
     conn.close()
 
 
+# ==================== Zahlungen (Stripe) ====================
+
+
+def user_has_active_subscription(user):
+    return user["subscription_status"] in ("active", "trialing")
+
+
+@app.route("/api/billing/status")
+@login_required
+def api_billing_status():
+    user = current_user()
+    return jsonify({
+        "active": user_has_active_subscription(user),
+        "status": user["subscription_status"],
+        "current_period_end": user["subscription_current_period_end"],
+    })
+
+
+@app.route("/api/billing/checkout", methods=["POST"])
+@login_required
+def api_billing_checkout():
+    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+        return jsonify({"ok": False, "error": "Zahlungen sind noch nicht eingerichtet."}), 400
+
+    user = current_user()
+    customer_id = user["stripe_customer_id"]
+    try:
+        if not customer_id:
+            customer = stripe.Customer.create(metadata={"user_id": user["id"], "username": user["username"]})
+            customer_id = customer.id
+            conn = get_db()
+            conn.execute("UPDATE users SET stripe_customer_id=? WHERE id=?", (customer_id, user["id"]))
+            conn.commit()
+            conn.close()
+
+        checkout_session = stripe.checkout.Session.create(
+            customer=customer_id,
+            mode="subscription",
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            success_url=f"{APP_BASE_URL}/?billing=success",
+            cancel_url=f"{APP_BASE_URL}/?billing=cancel",
+            metadata={"user_id": user["id"]},
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    return jsonify({"ok": True, "url": checkout_session.url})
+
+
+@app.route("/api/billing/portal", methods=["POST"])
+@login_required
+def api_billing_portal():
+    user = current_user()
+    if not user["stripe_customer_id"]:
+        return jsonify({"ok": False, "error": "Noch kein Abo vorhanden."}), 400
+    try:
+        portal = stripe.billing_portal.Session.create(customer=user["stripe_customer_id"], return_url=f"{APP_BASE_URL}/")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "url": portal.url})
+
+
+@app.route("/webhook/stripe", methods=["POST"])
+def stripe_webhook():
+    payload = request.data
+    sig_header = request.headers.get("Stripe-Signature", "")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except (ValueError, stripe.error.SignatureVerificationError):
+        return jsonify({"error": "invalid signature"}), 400
+
+    obj = event["data"]["object"]
+    etype = event["type"]
+
+    def set_status_by_customer(customer_id, status, period_end=None):
+        conn = get_db()
+        if period_end:
+            conn.execute(
+                "UPDATE users SET subscription_status=?, subscription_current_period_end=? WHERE stripe_customer_id=?",
+                (status, period_end, customer_id),
+            )
+        else:
+            conn.execute("UPDATE users SET subscription_status=? WHERE stripe_customer_id=?", (status, customer_id))
+        conn.commit()
+        conn.close()
+
+    if etype in ("customer.subscription.updated", "customer.subscription.created"):
+        period_end = dt.datetime.fromtimestamp(obj["current_period_end"], TZ).isoformat()
+        set_status_by_customer(obj["customer"], obj["status"], period_end)
+    elif etype == "customer.subscription.deleted":
+        set_status_by_customer(obj["customer"], "inactive")
+    elif etype == "checkout.session.completed" and obj.get("customer"):
+        set_status_by_customer(obj["customer"], "active")
+
+    return jsonify({"received": True})
+
+
 # ==================== KI-Lernassistent ====================
 
 TUTOR_LEVEL_INSTRUCTIONS = {
@@ -738,6 +858,14 @@ def reschedule_all_reminders():
 # ==================== Auth-Routen ====================
 
 
+def validate_password(pw):
+    if len(pw) < 8:
+        return False, "Das Passwort muss mindestens 8 Zeichen lang sein."
+    if not re.search(r"[^A-Za-z0-9]", pw):
+        return False, "Das Passwort muss mindestens ein Sonderzeichen enthalten."
+    return True, None
+
+
 @app.route("/api/register", methods=["POST"])
 def api_register():
     data = request.get_json()
@@ -749,6 +877,10 @@ def api_register():
 
     if not username or not password:
         return jsonify({"ok": False, "error": "Bitte Benutzername und Passwort ausfüllen."}), 400
+
+    pw_ok, pw_err = validate_password(password)
+    if not pw_ok:
+        return jsonify({"ok": False, "error": pw_err}), 400
 
     has_untis = bool(untis_username and untis_password)
 
@@ -860,6 +992,11 @@ def get_users_overview():
         })
     conn.close()
     return rows
+
+
+@app.route("/impressum")
+def legal_impressum():
+    return render_template("impressum.html")
 
 
 @app.route("/admin")
@@ -1191,6 +1328,8 @@ def api_tutor_chat():
         return jsonify({"ok": False, "error": "Leere Nachricht."}), 400
 
     user = current_user()
+    if not user_has_active_subscription(user):
+        return jsonify({"ok": False, "paywall": True, "error": "Der KI-Tutor ist Teil des Premium-Abos."}), 402
     uid = user["id"]
 
     conn = get_db()
