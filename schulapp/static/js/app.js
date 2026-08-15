@@ -424,6 +424,39 @@ document.getElementById("save-profile-btn").addEventListener("click", async () =
   renderGreeting();
 });
 
+document.getElementById("pw-new").addEventListener("input", (e) => {
+  document.getElementById("pw-new-hint").classList.toggle("ok", isPasswordValid(e.target.value));
+});
+
+document.getElementById("pw-change-btn").addEventListener("click", async () => {
+  const errorBox = document.getElementById("pw-change-error");
+  errorBox.classList.remove("visible");
+
+  const oldPw = document.getElementById("pw-old").value;
+  const newPw = document.getElementById("pw-new").value;
+
+  if (!isPasswordValid(newPw)) {
+    errorBox.textContent = "Neues Passwort braucht mind. 8 Zeichen und ein Sonderzeichen.";
+    errorBox.classList.add("visible");
+    return;
+  }
+
+  const result = await api("/api/password", {
+    method: "POST",
+    body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
+  });
+
+  if (result.ok) {
+    document.getElementById("pw-old").value = "";
+    document.getElementById("pw-new").value = "";
+    document.getElementById("pw-new-hint").classList.remove("ok");
+    haptic(10);
+  } else {
+    errorBox.textContent = result.error || "Passwort konnte nicht geändert werden.";
+    errorBox.classList.add("visible");
+  }
+});
+
 function renderTimeChips() {
   const times = state.settings.reminder_times || [];
   const el = document.getElementById("time-chips");
