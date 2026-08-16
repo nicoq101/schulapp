@@ -84,6 +84,20 @@ html, body {
   transition: background 0.25s var(--ease);
 }
 
+/* Sehr dezenter, STATISCHER Tiefenlayer (keine Animation) - gibt den Glass-Cards etwas zum
+   Durchscheinen, ohne vom Inhalt abzulenken. Fix positioniert, unabhängig vom Scroll. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(680px circle at 15% -10%, var(--accent-soft), transparent 60%),
+    radial-gradient(600px circle at 110% 30%, var(--accent-soft), transparent 55%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 h1, h2, h3, .display {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
   letter-spacing: -0.01em;
@@ -117,10 +131,23 @@ a { color: inherit; }
 /* ---------- Topbar ---------- */
 
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 15;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 24px 20px 8px;
+  background: transparent;
+  border-bottom: 0.5px solid transparent;
+  transition: background 0.25s var(--ease), border-color 0.25s var(--ease), backdrop-filter 0.25s var(--ease);
+}
+.topbar.scrolled {
+  background: var(--surface-blur);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border-bottom-color: var(--border);
+  padding-bottom: 12px;
 }
 
 .topbar .greeting { font-size: 13px; color: var(--text-muted); }
@@ -172,10 +199,13 @@ a { color: inherit; }
 }
 
 .card {
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
   border-radius: var(--radius);
   padding: 18px;
   box-shadow: var(--shadow-sm);
+  border: 0.5px solid color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 /* ---------- Period rail (Signature-Element) ---------- */
@@ -195,8 +225,11 @@ a { color: inherit; }
   padding: 12px 14px;
   margin-bottom: 8px;
   border-radius: var(--radius-sm);
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
   box-shadow: var(--shadow-sm);
+  border: 0.5px solid color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .rail-item::before {
@@ -247,10 +280,13 @@ a { color: inherit; }
 .tile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
 .tile {
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
   border-radius: var(--radius);
   padding: 16px;
   box-shadow: var(--shadow-sm);
+  border: 0.5px solid color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .tile .value { font-family: ui-monospace, "SF Mono", monospace; font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -268,6 +304,7 @@ a { color: inherit; }
 .task-row:last-child { border-bottom: none; }
 
 .check {
+  position: relative;
   width: 24px; height: 24px;
   border-radius: 50%;
   border: 1.5px solid var(--text-tertiary);
@@ -282,6 +319,19 @@ a { color: inherit; }
   transition: background 0.15s var(--ease), border-color 0.15s var(--ease), transform 0.15s var(--ease-spring);
 }
 .check.done { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); transform: scale(1.05); }
+.check.success-ring::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  opacity: 0.6;
+  animation: success-ring 0.5s var(--ease-spring) forwards;
+}
+@keyframes success-ring {
+  from { opacity: 0.6; transform: scale(0.6); }
+  to { opacity: 0; transform: scale(1.9); }
+}
 
 .task-fach { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); font-weight: 600; }
 .task-text { font-size: 15px; margin-top: 2px; }
@@ -585,6 +635,39 @@ a { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ---------- Skeleton / Shimmer (Ladezustände) ---------- */
+
+.skeleton {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(100deg, var(--surface-2) 30%, color-mix(in srgb, var(--surface-2) 60%, var(--text) 8%) 50%, var(--surface-2) 70%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 150% 0; }
+  100% { background-position: -50% 0; }
+}
+
+/* ---------- Stagger-Reveal für Listen ---------- */
+
+.stagger-in {
+  opacity: 0;
+  animation: stagger-in 0.35s var(--ease) forwards;
+  animation-delay: calc(var(--i, 0) * 40ms);
+}
+@keyframes stagger-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------- Zahlen-Transition (z.B. Notenschnitt, Kachel-Werte) ---------- */
+
+.value-transition {
+  display: inline-block;
+  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
+}
+.value-transition.updating { opacity: 0; transform: translateY(-4px) scale(0.96); }
 
 /* ---------- Auth-Screen ---------- */
 
