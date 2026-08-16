@@ -437,6 +437,20 @@ a { color: inherit; }
 .subscreen { display: none; }
 .subscreen.active { display: block; animation: fadein 0.3s var(--ease); }
 
+/* ---------- Install-Banner ---------- */
+
+.install-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 20px;
+}
+
 /* ---------- Anzeigenplätze ---------- */
 
 .ad-slot {
