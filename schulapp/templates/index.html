@@ -91,6 +91,19 @@
 
   <!-- ===================== DASHBOARD ===================== -->
   <section class="screen active" id="screen-dashboard">
+    <div class="install-banner" id="install-banner" style="display:none;">
+      <div>
+        <div style="font-weight:600; font-size:14px;">App installieren</div>
+        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Schneller Zugriff vom Homescreen, ohne Browser drumherum</div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-shrink:0;">
+        <button class="btn-primary" id="install-btn-banner" style="width:auto; padding:8px 14px; font-size:13px;">Installieren</button>
+        <button class="icon-btn" id="install-banner-dismiss" aria-label="Schließen" style="width:32px; height:32px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+
     <div class="tile-grid">
       <div class="tile">
         <div class="value mono" id="tile-next">–</div>
@@ -239,6 +252,17 @@
 
   <!-- ===================== EINSTELLUNGEN ===================== -->
   <section class="screen" id="screen-einstellungen">
+    <div class="section-title">App installieren</div>
+    <div class="card" id="install-card" style="display:none;">
+      <div class="settings-row">
+        <div>
+          <div class="label">Als App auf dem Homescreen</div>
+          <div class="sub">Schneller Zugriff, volle Bildschirmgröße, keine Adressleiste</div>
+        </div>
+        <button class="btn-primary" id="install-btn-settings" style="width:auto; padding:10px 16px;">Installieren</button>
+      </div>
+    </div>
+
     <div class="section-title">Darstellung</div>
     <div class="card">
       <div class="segmented" id="theme-segmented">
@@ -332,6 +356,21 @@
       <a href="/impressum" target="_blank" style="display:block; padding:10px 0; font-size:14px; color:var(--text);">Impressum</a>
     </div>
   </section>
+
+  <!-- ===================== iOS INSTALL SHEET ===================== -->
+  <div class="sheet-backdrop" id="ios-install-sheet-backdrop"></div>
+  <div class="sheet" id="ios-install-sheet">
+    <h3>App installieren</h3>
+    <p style="font-size:14px; color:var(--text-muted); line-height:1.6; margin:0 0 16px;">
+      Safari erlaubt die Installation nur über das Teilen-Menü:
+    </p>
+    <ol style="font-size:14px; line-height:2; padding-left:20px; margin:0 0 20px; color:var(--text);">
+      <li>Tippe unten in Safari auf das Teilen-Symbol (Quadrat mit Pfeil nach oben)</li>
+      <li>Wähle "Zum Home-Bildschirm"</li>
+      <li>Tippe oben rechts auf "Hinzufügen"</li>
+    </ol>
+    <button class="btn-primary" id="ios-install-sheet-close">Verstanden</button>
+  </div>
 
   <!-- ===================== NOTIFICATION CENTER (Overlay) ===================== -->
   <div class="sheet-backdrop" id="notif-backdrop"></div>
