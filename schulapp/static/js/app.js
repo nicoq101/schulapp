@@ -13,8 +13,19 @@ const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Sa
 // Leichtes haptisches Feedback, wo das Gerät es unterstützt (Android/Desktop;
 // iOS blockiert die Vibration API in Safari, daher übernimmt dort die
 // visuelle Press-Animation aus dem CSS die "Haptik").
-function haptic(ms = 8) {
-  if (navigator.vibrate) navigator.vibrate(ms);
+// Web Vibration API kann echte Taptic-Engine-Stufen nur annähern (kurze
+// Impulse verschiedener Länge/Muster), nicht exakt nachbilden.
+const HAPTIC_PATTERNS = {
+  light: 6,       // normale Buttons, Tab-Wechsel
+  medium: 12,      // wichtige Aktionen (Speichern, Löschen)
+  selection: 4,    // Picker, Segmented Control, Toggles
+  success: [10, 30, 10], // erfolgreiche Aktion (z.B. Aufgabe erledigt)
+  warning: [15, 40, 15, 40, 15], // Fehler / kritische Aktion
+};
+function haptic(kind = "light") {
+  if (!navigator.vibrate) return;
+  const pattern = typeof kind === "number" ? kind : (HAPTIC_PATTERNS[kind] || HAPTIC_PATTERNS.light);
+  navigator.vibrate(pattern);
 }
 
 // ==================== Hilfsfunktionen ====================
@@ -58,7 +69,7 @@ function updateFabVisibility() {
 
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
-    haptic(6);
+    haptic("selection");
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
     document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
     tab.classList.add("active");
@@ -70,7 +81,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
 document.getElementById("schule-subnav").addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
-  haptic(6);
+  haptic("selection");
   document.querySelectorAll("#schule-subnav button").forEach((b) => b.classList.remove("active"));
   document.querySelectorAll(".subscreen").forEach((s) => s.classList.remove("active"));
   btn.classList.add("active");
@@ -119,6 +130,20 @@ function renderGreeting() {
 
 // ==================== Dashboard ====================
 
+// Zeigt neue Werte mit einer kurzen, sanften Blend-Transition statt hartem Textwechsel
+// (z.B. Dashboard-Kacheln, Notenschnitt) - nur wenn sich der Wert wirklich ändert.
+function setValueAnimated(id, newValue) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const text = String(newValue);
+  if (el.textContent === text) return;
+  el.classList.add("value-transition", "updating");
+  setTimeout(() => {
+    el.textContent = text;
+    el.classList.remove("updating");
+  }, 120);
+}
+
 function renderDashboard() {
   const today = todayISO();
   const now = new Date();
@@ -133,19 +158,19 @@ function renderDashboard() {
   if (todaysLessons.length === 0) {
     rail.innerHTML = `<div class="empty-state"><div class="display">Heute keine Stunden 🎉</div>Genieß den Tag.</div>`;
   } else {
-    rail.innerHTML = todaysLessons.map((p) => renderRailItem(p, nowMinutes)).join("");
+    rail.innerHTML = todaysLessons.map((p, i) => renderRailItem(p, nowMinutes, i)).join("");
   }
 
   // Tiles: nächste Stunde
   const upcoming = todaysLessons.find((p) => toMinutes(p.start) > nowMinutes && p.code !== "cancelled");
-  document.getElementById("tile-next").textContent = upcoming ? upcoming.subject : "–";
+  setValueAnimated("tile-next", upcoming ? upcoming.subject : "–");
 
   // Tiles: verbleibende Stunden
   const remaining = todaysLessons.filter((p) => toMinutes(p.end) > nowMinutes && p.code !== "cancelled").length;
-  document.getElementById("tile-remaining").textContent = remaining;
+  setValueAnimated("tile-remaining", remaining);
 
   // Tiles: offene Aufgaben
-  document.getElementById("tile-tasks").textContent = state.tasks.length;
+  setValueAnimated("tile-tasks", state.tasks.length);
 
   // Tiles: nächste Klausur (automatisch von WebUntis + manuell eingetragen)
   const manualExamsForTile = state.tasks
@@ -154,9 +179,9 @@ function renderDashboard() {
   const nextExam = [...state.exams, ...manualExamsForTile].sort((a, b) => a.date.localeCompare(b.date))[0];
   if (nextExam) {
     const days = daysUntil(nextExam.date);
-    document.getElementById("tile-exam").textContent = days === 0 ? "Heute" : `${days}d`;
+    setValueAnimated("tile-exam", days === 0 ? "Heute" : `${days}d`);
   } else {
-    document.getElementById("tile-exam").textContent = "–";
+    setValueAnimated("tile-exam", "–");
   }
 
   // Bald fällig
@@ -184,9 +209,9 @@ function daysUntil(iso) {
   return Math.round((target - today) / 86400000);
 }
 
-function renderRailItem(p, nowMinutes) {
+function renderRailItem(p, nowMinutes, i = 0) {
   const isNow = nowMinutes >= toMinutes(p.start) && nowMinutes < toMinutes(p.end);
-  const classes = ["rail-item"];
+  const classes = ["rail-item", "stagger-in"];
   if (isNow) classes.push("now");
   if (p.code === "cancelled") classes.push("cancelled");
   if (p.code === "irregular") classes.push("irregular");
@@ -196,7 +221,7 @@ function renderRailItem(p, nowMinutes) {
   else if (p.code === "irregular") badge = `<span class="badge irregular">Vertretung</span>`;
 
   return `
-    <div class="${classes.join(" ")}">
+    <div class="${classes.join(" ")}" style="--i:${i}">
       <div class="rail-time mono">${p.start} – ${p.end}</div>
       <div class="rail-subject">${p.subject}${badge}</div>
       <div class="rail-meta">Raum ${p.room} · ${p.teacher}</div>
@@ -232,11 +257,11 @@ function fillTaskGroup(id, tasks) {
     el.innerHTML = `<div class="empty-state">Nichts hier.</div>`;
     return;
   }
-  el.innerHTML = tasks.map(renderTaskRow).join("");
+  el.innerHTML = tasks.map((t, i) => renderTaskRow(t, i)).join("");
   attachTaskHandlers(el);
 }
 
-function renderTaskRow(t) {
+function renderTaskRow(t, i = 0) {
   let urgency = "later";
   if (t.faellig) {
     const d = daysUntil(t.faellig);
@@ -249,7 +274,7 @@ function renderTaskRow(t) {
   const dueText = t.faellig ? fmtDate(t.faellig) : "kein Datum";
 
   return `
-    <div class="task-row" data-id="${t.id}">
+    <div class="task-row stagger-in" style="--i:${i}" data-id="${t.id}">
       <button class="check" data-action="done">✓</button>
       <div style="flex:1;">
         <div class="task-fach">${emoji} ${escapeHtml(t.fach)}</div>
@@ -265,8 +290,11 @@ function renderTaskRow(t) {
 function attachTaskHandlers(container) {
   container.querySelectorAll('[data-action="done"]').forEach((btn) => {
     btn.addEventListener("click", async () => {
-      haptic(12);
+      haptic("success");
+      btn.classList.add("done", "success-ring");
       const id = btn.closest(".task-row").dataset.id;
+      // Kurz die Erfolgs-Animation zeigen, bevor die Zeile aus der Liste verschwindet
+      await new Promise((resolve) => setTimeout(resolve, 220));
       await api(`/api/tasks/${id}`, { method: "PATCH", body: JSON.stringify({ erledigt: 1 }) });
       state.tasks = state.tasks.filter((t) => String(t.id) !== id);
       renderAll();
@@ -274,6 +302,7 @@ function attachTaskHandlers(container) {
   });
   container.querySelectorAll('[data-action="delete"]').forEach((btn) => {
     btn.addEventListener("click", async () => {
+      haptic("medium");
       const id = btn.closest(".task-row").dataset.id;
       await api(`/api/tasks/${id}`, { method: "DELETE" });
       state.tasks = state.tasks.filter((t) => String(t.id) !== id);
@@ -404,7 +433,7 @@ function renderEinstellungen() {
 
 document.querySelectorAll(".switch[data-setting]").forEach((sw) => {
   sw.addEventListener("click", async () => {
-    haptic(6);
+    haptic("selection");
     const key = sw.dataset.setting;
     const newVal = !sw.classList.contains("on");
     sw.classList.toggle("on", newVal);
@@ -448,8 +477,9 @@ document.getElementById("pw-change-btn").addEventListener("click", async () => {
     document.getElementById("pw-old").value = "";
     document.getElementById("pw-new").value = "";
     document.getElementById("pw-new-hint").classList.remove("ok");
-    haptic(10);
+    haptic("success");
   } else {
+    haptic("warning");
     errorBox.textContent = result.error || "Passwort konnte nicht geändert werden.";
     errorBox.classList.add("visible");
   }
@@ -748,8 +778,8 @@ function renderNoten(grades) {
     totalWeighted += g.note * g.gewichtung;
     totalWeight += g.gewichtung;
   }
-  document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–";
-  document.getElementById("tile-anzahl-noten").textContent = grades.length;
+  setValueAnimated("tile-schnitt", totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–");
+  setValueAnimated("tile-anzahl-noten", grades.length);
 
   const bySubjectEl = document.getElementById("grades-by-subject");
   const subjects = Object.keys(bySubject).sort();
@@ -845,7 +875,7 @@ function renderTutorChat(messages) {
 document.getElementById("tutor-level-segmented").addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
-  haptic(6);
+  haptic("selection");
   const wasActive = btn.classList.contains("active");
   document.querySelectorAll("#tutor-level-segmented button").forEach((b) => b.classList.remove("active"));
   tutorLevel = wasActive ? "" : btn.dataset.level;
@@ -982,6 +1012,20 @@ function initAds() {
     }
   });
 }
+
+// ==================== Sticky Topbar (Blur beim Scrollen) ====================
+
+let topbarScrolled = false;
+window.addEventListener(
+  "scroll",
+  () => {
+    const shouldBeScrolled = window.scrollY > 4;
+    if (shouldBeScrolled === topbarScrolled) return; // nur bei echtem Zustandswechsel neu rendern
+    topbarScrolled = shouldBeScrolled;
+    document.querySelector(".topbar").classList.toggle("scrolled", topbarScrolled);
+  },
+  { passive: true }
+);
 
 // ==================== Start ====================
 
