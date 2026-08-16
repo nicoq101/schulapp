@@ -906,6 +906,71 @@ document.getElementById("tutor-clear-btn").addEventListener("click", async () =>
   renderTutorChat([]);
 });
 
+// ==================== App-Installation (PWA) ====================
+
+let deferredInstallPrompt = null;
+const isStandaloneApp = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+const isIOSDevice = /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+function canOfferInstall() {
+  if (isStandaloneApp) return false;
+  return !!deferredInstallPrompt || isIOSDevice;
+}
+
+function updateInstallUI() {
+  const show = canOfferInstall();
+  const settingsCard = document.getElementById("install-card");
+  if (settingsCard) settingsCard.style.display = show ? "block" : "none";
+
+  const banner = document.getElementById("install-banner");
+  if (banner) {
+    const dismissed = localStorage.getItem("installBannerDismissed") === "1";
+    banner.style.display = show && !dismissed ? "flex" : "none";
+  }
+}
+
+async function triggerInstall() {
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    updateInstallUI();
+  } else if (isIOSDevice) {
+    document.getElementById("ios-install-sheet-backdrop").classList.add("open");
+    document.getElementById("ios-install-sheet").classList.add("open");
+  }
+}
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  updateInstallUI();
+});
+
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  updateInstallUI();
+});
+
+document.getElementById("install-btn-banner").addEventListener("click", triggerInstall);
+document.getElementById("install-btn-settings").addEventListener("click", triggerInstall);
+
+document.getElementById("install-banner-dismiss").addEventListener("click", () => {
+  localStorage.setItem("installBannerDismissed", "1");
+  document.getElementById("install-banner").style.display = "none";
+});
+
+document.getElementById("ios-install-sheet-close").addEventListener("click", () => {
+  document.getElementById("ios-install-sheet-backdrop").classList.remove("open");
+  document.getElementById("ios-install-sheet").classList.remove("open");
+});
+document.getElementById("ios-install-sheet-backdrop").addEventListener("click", () => {
+  document.getElementById("ios-install-sheet-backdrop").classList.remove("open");
+  document.getElementById("ios-install-sheet").classList.remove("open");
+});
+
+updateInstallUI();
+
 // ==================== Werbung (AdSense) ====================
 
 function initAds() {
