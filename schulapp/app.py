@@ -64,12 +64,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "gemini-flash-latest")  # Alias, zeigt immer auf die neueste Flash-Version
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Zahlungen (Lemon Squeezy – Merchant of Record: übernimmt Steuer/USt selbst)
-LEMONSQUEEZY_API_KEY = os.environ.get("LEMONSQUEEZY_API_KEY", "")
-LEMONSQUEEZY_STORE_ID = os.environ.get("LEMONSQUEEZY_STORE_ID", "")
-LEMONSQUEEZY_VARIANT_ID = os.environ.get("LEMONSQUEEZY_VARIANT_ID", "")
-LEMONSQUEEZY_WEBHOOK_SECRET = os.environ.get("LEMONSQUEEZY_WEBHOOK_SECRET", "")
-LEMONSQUEEZY_API_URL = "https://api.lemonsqueezy.com/v1"
+# Werbung (Google AdSense) - non-personalized Ads, da Zielgruppe teils minderjährig ist
+ADSENSE_CLIENT_ID = os.environ.get("ADSENSE_CLIENT_ID", "")  # z.B. "ca-pub-1234567890123456"
+ADSENSE_SLOT_DASHBOARD = os.environ.get("ADSENSE_SLOT_DASHBOARD", "")
+ADSENSE_SLOT_AUFGABEN = os.environ.get("ADSENSE_SLOT_AUFGABEN", "")
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
 
 
@@ -554,124 +552,6 @@ def log_notification(user_id, titel, text, typ):
     conn.close()
 
 
-# ==================== Zahlungen (Stripe) ====================
-
-
-def user_has_active_subscription(user):
-    return user["subscription_status"] in ("active", "on_trial")
-
-
-@app.route("/api/billing/status")
-@login_required
-def api_billing_status():
-    user = current_user()
-    return jsonify({
-        "active": user_has_active_subscription(user),
-        "status": user["subscription_status"],
-        "current_period_end": user["subscription_current_period_end"],
-    })
-
-
-@app.route("/api/billing/checkout", methods=["POST"])
-@login_required
-def api_billing_checkout():
-    if not (LEMONSQUEEZY_API_KEY and LEMONSQUEEZY_STORE_ID and LEMONSQUEEZY_VARIANT_ID):
-        return jsonify({"ok": False, "error": "Zahlungen sind noch nicht eingerichtet."}), 400
-
-    ip = get_client_ip()
-    if is_locked_out(ip, "checkout", max_attempts=10, window_hours=1):
-        return jsonify({"ok": False, "error": "Zu viele Anfragen. Bitte später erneut versuchen."}), 429
-    record_failed_login(ip, "checkout")
-
-    user = current_user()
-    try:
-        resp = requests.post(
-            f"{LEMONSQUEEZY_API_URL}/checkouts",
-            headers={
-                "Authorization": f"Bearer {LEMONSQUEEZY_API_KEY}",
-                "Content-Type": "application/vnd.api+json",
-                "Accept": "application/vnd.api+json",
-            },
-            json={
-                "data": {
-                    "type": "checkouts",
-                    "attributes": {
-                        # user_id landet als custom_data in jedem folgenden Webhook-Event -
-                        # so lässt sich das Abo direkt einem Account zuordnen, ganz ohne
-                        # vorherige Kund:innen-Anlage wie bei Stripe.
-                        "checkout_data": {"custom": {"user_id": str(user["id"])}},
-                        "product_options": {"redirect_url": f"{APP_BASE_URL}/?billing=success"},
-                    },
-                    "relationships": {
-                        "store": {"data": {"type": "stores", "id": str(LEMONSQUEEZY_STORE_ID)}},
-                        "variant": {"data": {"type": "variants", "id": str(LEMONSQUEEZY_VARIANT_ID)}},
-                    },
-                }
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        url = resp.json()["data"]["attributes"]["url"]
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-
-    return jsonify({"ok": True, "url": url})
-
-
-@app.route("/api/billing/portal", methods=["POST"])
-@login_required
-def api_billing_portal():
-    user = current_user()
-    if not user["lemonsqueezy_customer_id"]:
-        return jsonify({"ok": False, "error": "Noch kein Abo vorhanden."}), 400
-    try:
-        resp = requests.get(
-            f"{LEMONSQUEEZY_API_URL}/customers/{user['lemonsqueezy_customer_id']}",
-            headers={"Authorization": f"Bearer {LEMONSQUEEZY_API_KEY}", "Accept": "application/vnd.api+json"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        # Die Portal-URL ist signiert und läuft nach 24h ab - deshalb hier live abrufen,
-        # statt sie zu speichern.
-        url = resp.json()["data"]["attributes"]["urls"]["customer_portal"]
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True, "url": url})
-
-
-@app.route("/webhook/lemonsqueezy", methods=["POST"])
-def lemonsqueezy_webhook():
-    payload = request.data
-    sig_header = request.headers.get("X-Signature", "")
-    expected = hmac.new(LEMONSQUEEZY_WEBHOOK_SECRET.encode(), payload, hashlib.sha256).hexdigest()
-    if not LEMONSQUEEZY_WEBHOOK_SECRET or not hmac.compare_digest(expected, sig_header):
-        return jsonify({"error": "invalid signature"}), 400
-
-    event = request.get_json(silent=True) or {}
-    meta = event.get("meta", {})
-    event_name = meta.get("event_name", "")
-    user_id = (meta.get("custom_data") or {}).get("user_id")
-    attrs = event.get("data", {}).get("attributes", {})
-
-    data_type = event.get("data", {}).get("type", "")
-    # Nur echte Subscription-Objekte verarbeiten - subscription_payment_* & Co. liefern
-    # z.B. "subscription-invoices" mit anderem Attribut-Format (status: "paid" statt "active").
-    if event_name.startswith("subscription_") and data_type == "subscriptions" and user_id:
-        status = attrs.get("status", "inactive")
-        period_end = attrs.get("renews_at") or attrs.get("ends_at")
-        customer_id = attrs.get("customer_id")
-        conn = get_db()
-        conn.execute(
-            "UPDATE users SET subscription_status=?, subscription_current_period_end=?, "
-            "lemonsqueezy_customer_id=COALESCE(?, lemonsqueezy_customer_id) WHERE id=?",
-            (status, period_end, str(customer_id) if customer_id else None, user_id),
-        )
-        conn.commit()
-        conn.close()
-
-    return jsonify({"received": True})
-
-
 # ==================== KI-Lernassistent ====================
 
 TUTOR_LEVEL_INSTRUCTIONS = {
@@ -1061,11 +941,13 @@ def set_security_headers(response):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self'; "
+        "script-src 'self' https://pagead2.googlesyndication.com https://www.googletagservices.com "
+        "https://googleads.g.doubleclick.net; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self'; "
+        "img-src 'self' data: https://*.googlesyndication.com https://*.doubleclick.net; "
+        "connect-src 'self' https://*.googlesyndication.com https://*.google.com; "
+        "frame-src https://googleads.g.doubleclick.net https://*.googlesyndication.com; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self';"
@@ -1075,7 +957,12 @@ def set_security_headers(response):
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        adsense_client_id=ADSENSE_CLIENT_ID,
+        adsense_slot_dashboard=ADSENSE_SLOT_DASHBOARD,
+        adsense_slot_aufgaben=ADSENSE_SLOT_AUFGABEN,
+    )
 
 
 def admin_authorized():
@@ -1447,8 +1334,6 @@ def api_tutor_chat():
         return jsonify({"ok": False, "error": "Leere Nachricht."}), 400
 
     user = current_user()
-    if not user_has_active_subscription(user):
-        return jsonify({"ok": False, "paywall": True, "error": "Der KI-Tutor ist Teil des Premium-Abos."}), 402
     uid = user["id"]
 
     if tutor_rate_limited(uid):
