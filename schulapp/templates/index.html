@@ -10,6 +10,14 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="stylesheet" href="/static/css/style.css" />
+{% if adsense_client_id %}
+<script>
+  // Non-personalized Ads erzwingen (Google Child-Directed-Treatment) - Pflicht bei
+  // Zielgruppen, die (teilweise) minderjährig sind. Siehe: support.google.com/adsense
+  (window.adsbygoogle = window.adsbygoogle || []).requestNonPersonalizedAds = 1;
+</script>
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={{ adsense_client_id }}" crossorigin="anonymous"></script>
+{% endif %}
 </head>
 <body>
 <div id="auth-screen">
@@ -111,6 +119,18 @@
     <div class="card" id="dashboard-tasks">
       <div class="empty-state"><div class="display">Lädt …</div></div>
     </div>
+
+    {% if adsense_client_id and adsense_slot_dashboard %}
+    <div class="ad-slot">
+      <span class="ad-label">Anzeige</span>
+      <ins class="adsbygoogle"
+           style="display:block"
+           data-ad-client="{{ adsense_client_id }}"
+           data-ad-slot="{{ adsense_slot_dashboard }}"
+           data-ad-format="auto"
+           data-full-width-responsive="true"></ins>
+    </div>
+    {% endif %}
   </section>
 
   <!-- ===================== SCHULE (Aufgaben / Noten / Plan / Tutor) ===================== -->
@@ -134,6 +154,18 @@
 
       <div class="section-title">🟢 Später / Ohne Datum</div>
       <div class="card" id="tasks-later"></div>
+
+      {% if adsense_client_id and adsense_slot_aufgaben %}
+      <div class="ad-slot">
+        <span class="ad-label">Anzeige</span>
+        <ins class="adsbygoogle"
+             style="display:block"
+             data-ad-client="{{ adsense_client_id }}"
+             data-ad-slot="{{ adsense_slot_aufgaben }}"
+             data-ad-format="auto"
+             data-full-width-responsive="true"></ins>
+      </div>
+      {% endif %}
     </div>
 
     <div class="subscreen" id="sub-noten">
@@ -164,12 +196,6 @@
     </div>
 
     <div class="subscreen" id="sub-tutor">
-      <div class="card" id="tutor-paywall" style="display:none; text-align:center; padding: 32px 20px;">
-        <div class="display" style="font-size:18px; margin-bottom:8px;">🔒 Premium-Feature</div>
-        <p style="color:var(--text-muted); font-size:14px; margin:0 0 18px;">Der KI-Lernassistent ist Teil des Abos.</p>
-        <button class="btn-primary" id="tutor-upgrade-btn" style="max-width:260px; margin:0 auto;">Jetzt freischalten</button>
-      </div>
-
       <div id="tutor-chat-ui">
         <div style="display:flex; gap:10px; align-items:flex-end; margin-bottom: 16px;">
           <div class="field" style="flex:1; margin-bottom:0;">
@@ -299,17 +325,6 @@
         <div class="pw-hint" id="pw-new-hint">Mind. 8 Zeichen und ein Sonderzeichen</div>
       </div>
       <button class="btn-primary" id="pw-change-btn">Passwort ändern</button>
-    </div>
-
-    <div class="section-title">Abo</div>
-    <div class="card">
-      <div class="settings-row">
-        <div>
-          <div class="label">Status</div>
-          <div class="sub" id="billing-status-text">Lädt …</div>
-        </div>
-        <button class="btn-primary" id="billing-action-btn" style="width:auto; padding:10px 16px;">…</button>
-      </div>
     </div>
 
     <div class="section-title">Rechtliches</div>
