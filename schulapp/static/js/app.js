@@ -81,7 +81,7 @@ document.getElementById("schule-subnav").addEventListener("click", (e) => {
 // ==================== Daten laden ====================
 
 async function loadAll() {
-  const [timetable, exams, tasks, settings, notifications, grades, tutorHistory, billing] = await Promise.all([
+  const [timetable, exams, tasks, settings, notifications, grades, tutorHistory] = await Promise.all([
     api("/api/timetable"),
     api("/api/exams"),
     api("/api/tasks"),
@@ -89,9 +89,8 @@ async function loadAll() {
     api("/api/notifications"),
     api("/api/grades"),
     api("/api/tutor/history"),
-    api("/api/billing/status"),
   ]);
-  state = { timetable, exams, tasks, settings, notifications, grades, tutorHistory, billing };
+  state = { timetable, exams, tasks, settings, notifications, grades, tutorHistory };
   renderAll();
 }
 
@@ -106,7 +105,6 @@ function renderAll() {
   renderNoten(state.grades || []);
   populateTutorFaecher();
   renderTutorChat(state.tutorHistory || []);
-  renderBilling();
 }
 
 // ==================== Begrüßung ====================
@@ -713,6 +711,7 @@ document.getElementById("logout-btn").addEventListener("click", async () => {
 function showApp() {
   document.getElementById("auth-screen").classList.add("hidden");
   document.getElementById("app").classList.add("visible");
+  initAds();
 }
 
 async function checkAuth() {
@@ -907,54 +906,16 @@ document.getElementById("tutor-clear-btn").addEventListener("click", async () =>
   renderTutorChat([]);
 });
 
-// ==================== Abo / Zahlungen ====================
+// ==================== Werbung (AdSense) ====================
 
-function renderBilling() {
-  const active = !!(state.billing && state.billing.active);
-
-  const paywall = document.getElementById("tutor-paywall");
-  const chatUi = document.getElementById("tutor-chat-ui");
-  if (paywall && chatUi) {
-    paywall.style.display = active ? "none" : "block";
-    chatUi.style.display = active ? "block" : "none";
-  }
-
-  const statusText = document.getElementById("billing-status-text");
-  const actionBtn = document.getElementById("billing-action-btn");
-  if (statusText && actionBtn) {
-    statusText.textContent = active ? "Premium aktiv – KI-Tutor freigeschaltet" : "Kostenlos – KI-Tutor gesperrt";
-    actionBtn.textContent = active ? "Abo verwalten" : "Upgraden";
-  }
-}
-
-async function startCheckout() {
-  const result = await api("/api/billing/checkout", { method: "POST" });
-  if (result.ok) {
-    window.location.href = result.url;
-  } else {
-    alert(result.error || "Checkout konnte nicht gestartet werden.");
-  }
-}
-
-document.getElementById("tutor-upgrade-btn").addEventListener("click", startCheckout);
-
-document.getElementById("billing-action-btn").addEventListener("click", async () => {
-  if (state.billing && state.billing.active) {
-    const result = await api("/api/billing/portal", { method: "POST" });
-    if (result.ok) window.location.href = result.url;
-    else alert(result.error || "Abo-Verwaltung konnte nicht geöffnet werden.");
-  } else {
-    startCheckout();
-  }
-});
-
-// Nach Rückkehr von Stripe Checkout kurz den Billing-Status neu laden
-if (new URLSearchParams(window.location.search).get("billing") === "success") {
-  window.history.replaceState({}, "", "/");
-  setTimeout(async () => {
-    state.billing = await api("/api/billing/status");
-    renderBilling();
-  }, 1500);
+function initAds() {
+  document.querySelectorAll("ins.adsbygoogle:not([data-ad-status])").forEach(() => {
+    try {
+      (window.adsbygoogle = window.adsbygoogle || []).push({});
+    } catch (e) {
+      // AdSense-Script evtl. noch nicht geladen oder geblockt (Adblocker) - kein Problem, still ignorieren
+    }
+  });
 }
 
 // ==================== Start ====================
