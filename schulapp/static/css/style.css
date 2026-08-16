@@ -437,6 +437,25 @@ a { color: inherit; }
 .subscreen { display: none; }
 .subscreen.active { display: block; animation: fadein 0.3s var(--ease); }
 
+/* ---------- Anzeigenplätze ---------- */
+
+.ad-slot {
+  margin-top: 20px;
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  min-height: 90px;
+}
+.ad-label {
+  display: block;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
 /* ---------- KI-Lernassistent ---------- */
 
 .tutor-chat {
