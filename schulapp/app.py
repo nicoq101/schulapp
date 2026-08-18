@@ -193,6 +193,21 @@ def init_db():
             fach TEXT,
             erstellt TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS flashcard_sets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            fach TEXT NOT NULL,
+            thema TEXT NOT NULL,
+            erstellt TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS flashcards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            set_id INTEGER NOT NULL,
+            frage TEXT NOT NULL,
+            antwort TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -1077,7 +1092,8 @@ def admin_delete(user_id):
     if not admin_authorized():
         return jsonify({"error": "unauthorized"}), 403
     conn = get_db()
-    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades", "tutor_messages"):
+    conn.execute("DELETE FROM flashcards WHERE set_id IN (SELECT id FROM flashcard_sets WHERE user_id=?)", (user_id,))
+    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades", "tutor_messages", "flashcard_sets"):
         conn.execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
@@ -1283,6 +1299,119 @@ def api_grade_delete(grade_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
+
+
+# ==================== Karteikarten ====================
+
+
+def generate_flashcards(fach, thema, anzahl=8):
+    if not GEMINI_API_KEY:
+        return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt)."
+
+    system_prompt = (
+        f"Du erstellst Karteikarten zum Lernen für Schüler:innen. Erzeuge genau {anzahl} Karteikarten "
+        f'zum Fach "{fach}", Thema "{thema}". Antworte AUSSCHLIESSLICH mit einem JSON-Array, keine '
+        "Erklärung, keine Markdown-Codeblöcke, kein Text davor oder danach. Format: "
+        '[{"frage": "...", "antwort": "..."}]. Fragen kurz und präzise, Antworten kurz und korrekt, '
+        "altersgerecht für Schüler:innen."
+    )
+    text, error = call_tutor_ai(
+        system_prompt, [{"role": "user", "content": f"Erstelle die Karteikarten zu {thema} ({fach})."}]
+    )
+    if error:
+        return None, error
+
+    cleaned = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
+    try:
+        raw_cards = json.loads(cleaned)
+        cards = [
+            {"frage": str(c["frage"]).strip(), "antwort": str(c["antwort"]).strip()}
+            for c in raw_cards
+            if c.get("frage") and c.get("antwort")
+        ]
+    except Exception:
+        return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
+
+    if not cards:
+        return None, "Keine Karteikarten erzeugt. Bitte nochmal versuchen."
+    return cards, None
+
+
+@app.route("/api/flashcards/generate", methods=["POST"])
+@login_required
+def api_flashcards_generate():
+    data = request.get_json()
+    fach = (data.get("fach") or "").strip()
+    thema = (data.get("thema") or "").strip()
+    if not fach or not thema:
+        return jsonify({"ok": False, "error": "Bitte Fach und Thema angeben."}), 400
+
+    uid = session["user_id"]
+    if tutor_rate_limited(uid):
+        return jsonify({
+            "ok": False,
+            "error": f"Maximal {TUTOR_RATE_LIMIT_PER_HOUR} KI-Anfragen pro Stunde. Bitte gleich nochmal versuchen.",
+        }), 429
+
+    cards, error = generate_flashcards(fach, thema)
+    if error:
+        return jsonify({"ok": False, "error": error})
+
+    conn = get_db()
+    # Zählt als KI-Anfrage fürs Rate-Limit, genau wie eine Tutor-Chat-Nachricht
+    conn.execute(
+        "INSERT INTO tutor_messages (user_id, role, content, level, fach, erstellt) VALUES (?,?,?,?,?,?)",
+        (uid, "user", f"[Karteikarten generiert: {thema}]", "", fach, dt.datetime.now(TZ).isoformat()),
+    )
+    cur = conn.execute(
+        "INSERT INTO flashcard_sets (user_id, fach, thema, erstellt) VALUES (?,?,?,?)",
+        (uid, fach, thema, dt.datetime.now(TZ).isoformat()),
+    )
+    set_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO flashcards (set_id, frage, antwort) VALUES (?,?,?)",
+        [(set_id, c["frage"], c["antwort"]) for c in cards],
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify({"ok": True, "set_id": set_id})
+
+
+@app.route("/api/flashcards/sets")
+@login_required
+def api_flashcards_sets():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT fs.id, fs.fach, fs.thema, fs.erstellt, COUNT(fc.id) AS anzahl "
+        "FROM flashcard_sets fs LEFT JOIN flashcards fc ON fc.set_id = fs.id "
+        "WHERE fs.user_id=? GROUP BY fs.id ORDER BY fs.id DESC",
+        (session["user_id"],),
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/flashcards/sets/<int:set_id>", methods=["GET", "DELETE"])
+@login_required
+def api_flashcards_set_detail(set_id):
+    uid = session["user_id"]
+    conn = get_db()
+    owns = conn.execute("SELECT 1 FROM flashcard_sets WHERE id=? AND user_id=?", (set_id, uid)).fetchone()
+    if not owns:
+        conn.close()
+        return jsonify({"error": "not_found"}), 404
+
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM flashcards WHERE set_id=?", (set_id,))
+        conn.execute("DELETE FROM flashcard_sets WHERE id=?", (set_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+
+    cards = conn.execute("SELECT id, frage, antwort FROM flashcards WHERE set_id=?", (set_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(c) for c in cards])
 
 
 # ==================== KI-Lernassistent (Routen) ====================
