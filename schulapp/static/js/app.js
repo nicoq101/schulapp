@@ -51,12 +51,25 @@ function weekdayName(iso) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    ...options,
-  });
-  return res.json();
+  try {
+    const res = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      ...options,
+    });
+    if (res.status === 401) {
+      // Session abgelaufen/ungültig (z.B. Account wurde gelöscht) - zurück zum Login
+      showAuthScreen();
+      return { ok: false, error: "Sitzung abgelaufen. Bitte erneut anmelden." };
+    }
+    try {
+      return await res.json();
+    } catch {
+      return { ok: false, error: `Unerwartete Antwort vom Server (${res.status}).` };
+    }
+  } catch (e) {
+    return { ok: false, error: "Keine Verbindung zum Server. Bitte Internetverbindung prüfen." };
+  }
 }
 
 // ==================== Navigation ====================
@@ -221,7 +234,7 @@ function renderRailItem(p, nowMinutes, i = 0) {
   else if (p.code === "irregular") badge = `<span class="badge irregular">Vertretung</span>`;
 
   return `
-    <div class="${classes.join(" ")}" style="--i:${i}">
+    <div class="${classes.join(" ")}" style="--i:${i}; border-left: 3px solid ${subjectColor(p.subject)};">
       <div class="rail-time mono">${p.start} – ${p.end}</div>
       <div class="rail-subject">${p.subject}${badge}</div>
       <div class="rail-meta">Raum ${p.room} · ${p.teacher}</div>
@@ -277,7 +290,7 @@ function renderTaskRow(t, i = 0) {
     <div class="task-row stagger-in" style="--i:${i}" data-id="${t.id}">
       <button class="check" data-action="done">✓</button>
       <div style="flex:1;">
-        <div class="task-fach">${emoji} ${escapeHtml(t.fach)}</div>
+        <div class="task-fach">${subjectDot(t.fach)}${emoji} ${escapeHtml(t.fach)}</div>
         <div class="task-text">${escapeHtml(t.text)}</div>
         <div class="task-due ${urgency}">${dueText}</div>
       </div>
@@ -734,9 +747,13 @@ document.getElementById("auth-submit").addEventListener("click", async () => {
 
 document.getElementById("logout-btn").addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" });
+  showAuthScreen();
+});
+
+function showAuthScreen() {
   document.getElementById("app").classList.remove("visible");
   document.getElementById("auth-screen").classList.remove("hidden");
-});
+}
 
 function showApp() {
   document.getElementById("auth-screen").classList.add("hidden");
@@ -767,6 +784,83 @@ function switchTaskType(typ) {
   if (isNote) applyNotenskala(state.settings.notenskala || "unterstufe");
 }
 
+// ==================== Fach-Farben ====================
+
+// iOS-Systemfarben-Palette - jedes Fach bekommt deterministisch (per Hash des
+// Namens) immer dieselbe Farbe, ganz ohne eigene Zuordnung pflegen zu müssen.
+const SUBJECT_PALETTE = [
+  "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE",
+  "#30B0C7", "#32ADE6", "#007AFF", "#5856D6", "#AF52DE", "#FF2D55",
+];
+function subjectColor(fach) {
+  let hash = 0;
+  for (let i = 0; i < fach.length; i++) hash = (hash * 31 + fach.charCodeAt(i)) >>> 0;
+  return SUBJECT_PALETTE[hash % SUBJECT_PALETTE.length];
+}
+function subjectDot(fach) {
+  return `<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${subjectColor(fach)}; margin-right:6px; flex-shrink:0;"></span>`;
+}
+
+function renderGradeTrend(grades) {
+  const container = document.getElementById("grade-trend-chart");
+  const skala = state.settings.notenskala || "unterstufe";
+  const dated = grades.filter((g) => g.datum).sort((a, b) => a.datum.localeCompare(b.datum));
+
+  if (dated.length < 2) {
+    container.innerHTML = `<div class="empty-state" style="padding:16px 4px;">Mind. 2 Noten mit Datum nötig für einen Trend.</div>`;
+    return;
+  }
+
+  // Laufender gewichteter Schnitt nach jeder neuen Note - zeigt die Entwicklung
+  // über die Zeit statt nur einzelne, verrauschte Werte.
+  let wSum = 0, wTotal = 0;
+  const points = dated.map((g) => {
+    wSum += g.note * g.gewichtung;
+    wTotal += g.gewichtung;
+    return wSum / wTotal;
+  });
+
+  const width = 300, height = 110, pad = 10;
+  const min = Math.min(...points), max = Math.max(...points);
+  const range = max - min || 1;
+
+  // Bei "unterstufe" ist eine niedrigere Zahl besser - Achse spiegeln, damit
+  // "nach oben" immer "Verbesserung" bedeutet, unabhängig von der Notenskala.
+  const yFor = (v) => {
+    const t = (v - min) / range;
+    const flipped = skala === "unterstufe" ? 1 - t : t;
+    return pad + (1 - flipped) * (height - 2 * pad);
+  };
+  const xFor = (i) => pad + (i / (points.length - 1)) * (width - 2 * pad);
+
+  const pathD = points.map((v, i) => `${i === 0 ? "M" : "L"} ${xFor(i).toFixed(1)} ${yFor(v).toFixed(1)}`).join(" ");
+  const lastX = xFor(points.length - 1), lastY = yFor(points[points.length - 1]);
+  const areaD = `${pathD} L ${lastX.toFixed(1)} ${height - pad} L ${xFor(0).toFixed(1)} ${height - pad} Z`;
+
+  const digits = skala === "oberstufe" ? 1 : 2;
+  const unit = skala === "oberstufe" ? " NP" : "";
+  const current = points[points.length - 1].toFixed(digits);
+  const first = points[0].toFixed(digits);
+  const improving = skala === "unterstufe" ? points[points.length - 1] < points[0] : points[points.length - 1] > points[0];
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:96px; display:block;">
+      <defs>
+        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" style="stop-color:var(--accent); stop-opacity:0.25" />
+          <stop offset="100%" style="stop-color:var(--accent); stop-opacity:0" />
+        </linearGradient>
+      </defs>
+      <path d="${areaD}" style="fill:url(#trendFill)" />
+      <path d="${pathD}" style="fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round" />
+      <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" style="fill:var(--accent)" />
+    </svg>
+    <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px; color:var(--text-muted);">
+      <span>Start: ${first}${unit}</span>
+      <span style="${improving ? "color:var(--success); font-weight:600;" : ""}">${improving ? "↑ " : ""}Aktuell: ${current}${unit}</span>
+    </div>`;
+}
+
 function renderNoten(grades) {
   const skala = state.settings.notenskala || "unterstufe";
   const unit = skala === "oberstufe" ? " NP" : "";
@@ -780,6 +874,7 @@ function renderNoten(grades) {
   }
   setValueAnimated("tile-schnitt", totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–");
   setValueAnimated("tile-anzahl-noten", grades.length);
+  renderGradeTrend(grades);
 
   const bySubjectEl = document.getElementById("grades-by-subject");
   const subjects = Object.keys(bySubject).sort();
@@ -793,7 +888,7 @@ function renderNoten(grades) {
         const wSum = list.reduce((s, g) => s + g.gewichtung, 0);
         const schnitt = (w / wSum).toFixed(skala === "oberstufe" ? 1 : 2);
         return `<div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
-          <div><div class="task-fach">${escapeHtml(fach)}</div><div class="task-text">${list.length} Note${list.length !== 1 ? "n" : ""}</div></div>
+          <div><div class="task-fach">${subjectDot(fach)}${escapeHtml(fach)}</div><div class="task-text">${list.length} Note${list.length !== 1 ? "n" : ""}</div></div>
           <div class="value mono" style="font-size:20px;">${schnitt}${unit}</div>
         </div>`;
       })
@@ -809,7 +904,7 @@ function renderNoten(grades) {
         (g) => `
         <div class="task-row" data-id="${g.id}">
           <div style="flex:1;">
-            <div class="task-fach">${escapeHtml(g.fach)}${g.art ? " · " + escapeHtml(g.art) : ""}</div>
+            <div class="task-fach">${subjectDot(g.fach)}${escapeHtml(g.fach)}${g.art ? " · " + escapeHtml(g.art) : ""}</div>
             <div class="task-text">${g.beschreibung ? escapeHtml(g.beschreibung) : fmtDate(g.datum)}</div>
             <div class="task-due later">Gewichtung ${g.gewichtung}x</div>
           </div>
@@ -843,15 +938,24 @@ const TUTOR_LEVEL_LABELS = {
 };
 
 function populateTutorFaecher() {
-  const select = document.getElementById("tutor-fach");
   const faecher = new Set();
   (state.tasks || []).forEach((t) => faecher.add(t.fach));
   (state.grades || []).forEach((g) => faecher.add(g.fach));
+  const sorted = [...faecher].sort();
+
+  const select = document.getElementById("tutor-fach");
   const current = select.value;
   select.innerHTML =
     `<option value="">Allgemein</option>` +
-    [...faecher].sort().map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+    sorted.map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
   select.value = current && faecher.has(current) ? current : "";
+
+  const fcSelect = document.getElementById("flashcard-fach");
+  const fcCurrent = fcSelect.value;
+  fcSelect.innerHTML =
+    `<option value="">Fach wählen</option>` +
+    sorted.map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+  fcSelect.value = fcCurrent && faecher.has(fcCurrent) ? fcCurrent : "";
 }
 
 function renderTutorMessage(m) {
@@ -935,6 +1039,260 @@ document.getElementById("tutor-clear-btn").addEventListener("click", async () =>
   state.tutorHistory = [];
   renderTutorChat([]);
 });
+
+// ==================== Karteikarten ====================
+
+document.getElementById("tutor-subnav").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-tutor-tab]");
+  if (!btn) return;
+  haptic("selection");
+  document.querySelectorAll("#tutor-subnav button").forEach((b) => b.classList.remove("active"));
+  btn.classList.add("active");
+  const isChat = btn.dataset.tutorTab === "chat";
+  document.getElementById("tutor-chat-ui").style.display = isChat ? "block" : "none";
+  document.getElementById("tutor-flashcards-ui").style.display = isChat ? "none" : "block";
+  if (!isChat) loadFlashcardSets();
+});
+
+async function loadFlashcardSets() {
+  const sets = await api("/api/flashcards/sets");
+  const el = document.getElementById("flashcard-sets-list");
+  if (!sets.length) {
+    el.innerHTML = `<div class="empty-state">Noch keine Karteikarten erstellt.</div>`;
+    return;
+  }
+  el.innerHTML = sets
+    .map(
+      (s, i) => `
+      <div class="card stagger-in" style="--i:${i}; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;" data-set-id="${s.id}">
+        <div style="flex:1; cursor:pointer;" data-action="open-set">
+          <div class="task-fach">${subjectDot(s.fach)}${escapeHtml(s.fach)}</div>
+          <div class="task-text">${escapeHtml(s.thema)}</div>
+          <div class="task-due later">${s.anzahl} Karte${s.anzahl !== 1 ? "n" : ""}</div>
+        </div>
+        <button class="icon-btn" data-action="delete-set" style="width:32px;height:32px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>`
+    )
+    .join("");
+
+  el.querySelectorAll('[data-action="open-set"]').forEach((row) => {
+    row.addEventListener("click", () => openFlashcardStudy(row.closest("[data-set-id]").dataset.setId));
+  });
+  el.querySelectorAll('[data-action="delete-set"]').forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      haptic("medium");
+      const setId = btn.closest("[data-set-id]").dataset.setId;
+      await api(`/api/flashcards/sets/${setId}`, { method: "DELETE" });
+      loadFlashcardSets();
+    });
+  });
+}
+
+document.getElementById("flashcard-generate-btn").addEventListener("click", async () => {
+  const fach = document.getElementById("flashcard-fach").value;
+  const thema = document.getElementById("flashcard-thema").value.trim();
+  if (!fach || !thema) {
+    alert("Bitte Fach und Thema angeben.");
+    return;
+  }
+  const btn = document.getElementById("flashcard-generate-btn");
+  btn.disabled = true;
+  btn.textContent = "Erstelle Karten …";
+  haptic("medium");
+
+  const result = await api("/api/flashcards/generate", { method: "POST", body: JSON.stringify({ fach, thema }) });
+
+  btn.disabled = false;
+  btn.textContent = "Karteikarten erstellen";
+
+  if (result.ok) {
+    haptic("success");
+    document.getElementById("flashcard-thema").value = "";
+    await loadFlashcardSets();
+    openFlashcardStudy(result.set_id);
+  } else {
+    haptic("warning");
+    alert(result.error || "Karteikarten konnten nicht erstellt werden.");
+  }
+});
+
+let currentFlashcards = [];
+let currentFlashcardIndex = 0;
+let currentFlashcardShowingAnswer = false;
+
+async function openFlashcardStudy(setId) {
+  const cards = await api(`/api/flashcards/sets/${setId}`);
+  if (!Array.isArray(cards) || !cards.length) return;
+  currentFlashcards = cards;
+  currentFlashcardIndex = 0;
+  currentFlashcardShowingAnswer = false;
+  renderFlashcardStudy();
+  document.getElementById("flashcard-study-backdrop").classList.add("open");
+  document.getElementById("flashcard-study-sheet").classList.add("open");
+}
+
+function renderFlashcardStudy() {
+  const card = currentFlashcards[currentFlashcardIndex];
+  document.getElementById("flashcard-progress").textContent = `${currentFlashcardIndex + 1} / ${currentFlashcards.length}`;
+  const textEl = document.getElementById("flashcard-flip-text");
+  textEl.classList.add("updating");
+  setTimeout(() => {
+    textEl.textContent = currentFlashcardShowingAnswer ? card.antwort : card.frage;
+    textEl.classList.remove("updating");
+  }, 120);
+  document.getElementById("flashcard-flip-btn").textContent = currentFlashcardShowingAnswer ? "Frage zeigen" : "Antwort zeigen";
+}
+
+document.getElementById("flashcard-flip-btn").addEventListener("click", () => {
+  haptic("selection");
+  currentFlashcardShowingAnswer = !currentFlashcardShowingAnswer;
+  renderFlashcardStudy();
+});
+document.getElementById("flashcard-prev-btn").addEventListener("click", () => {
+  if (currentFlashcardIndex === 0) return;
+  haptic("light");
+  currentFlashcardIndex -= 1;
+  currentFlashcardShowingAnswer = false;
+  renderFlashcardStudy();
+});
+document.getElementById("flashcard-next-btn").addEventListener("click", () => {
+  if (currentFlashcardIndex >= currentFlashcards.length - 1) return;
+  haptic("light");
+  currentFlashcardIndex += 1;
+  currentFlashcardShowingAnswer = false;
+  renderFlashcardStudy();
+});
+function closeFlashcardStudy() {
+  document.getElementById("flashcard-study-backdrop").classList.remove("open");
+  document.getElementById("flashcard-study-sheet").classList.remove("open");
+}
+document.getElementById("flashcard-study-close").addEventListener("click", closeFlashcardStudy);
+document.getElementById("flashcard-study-backdrop").addEventListener("click", closeFlashcardStudy);
+
+// ==================== Globale Suche ====================
+
+document.getElementById("search-btn").addEventListener("click", () => {
+  haptic("light");
+  document.getElementById("search-backdrop").classList.add("open");
+  document.getElementById("search-sheet").classList.add("open");
+  const input = document.getElementById("search-input");
+  input.value = "";
+  document.getElementById("search-results").innerHTML = "";
+  setTimeout(() => input.focus(), 300);
+});
+
+function closeSearch() {
+  document.getElementById("search-backdrop").classList.remove("open");
+  document.getElementById("search-sheet").classList.remove("open");
+}
+document.getElementById("search-backdrop").addEventListener("click", closeSearch);
+
+document.getElementById("search-input").addEventListener("input", (e) => {
+  runSearch(e.target.value.trim().toLowerCase());
+});
+
+function runSearch(q) {
+  const resultsEl = document.getElementById("search-results");
+  if (!q) {
+    resultsEl.innerHTML = "";
+    return;
+  }
+
+  const taskResults = (state.tasks || []).filter(
+    (t) => t.fach.toLowerCase().includes(q) || t.text.toLowerCase().includes(q)
+  );
+  const gradeResults = (state.grades || []).filter(
+    (g) =>
+      g.fach.toLowerCase().includes(q) ||
+      (g.beschreibung || "").toLowerCase().includes(q) ||
+      (g.art || "").toLowerCase().includes(q)
+  );
+  const planResults = (state.timetable || [])
+    .filter(
+      (p) =>
+        p.subject.toLowerCase().includes(q) ||
+        (p.teacher || "").toLowerCase().includes(q) ||
+        (p.room || "").toLowerCase().includes(q)
+    )
+    .slice(0, 8);
+
+  if (!taskResults.length && !gradeResults.length && !planResults.length) {
+    resultsEl.innerHTML = `<div class="empty-state">Nichts gefunden.</div>`;
+    return;
+  }
+
+  let html = "";
+  if (taskResults.length) {
+    html += `<div class="section-title">Aufgaben</div>`;
+    html += taskResults
+      .map(
+        (t) => `
+      <div class="task-row" data-goto="aufgaben" data-id="${t.id}" style="cursor:pointer;">
+        <div style="flex:1;">
+          <div class="task-fach">${subjectDot(t.fach)}${escapeHtml(t.fach)}</div>
+          <div class="task-text">${escapeHtml(t.text)}</div>
+        </div>
+      </div>`
+      )
+      .join("");
+  }
+  if (gradeResults.length) {
+    html += `<div class="section-title">Noten</div>`;
+    html += gradeResults
+      .map(
+        (g) => `
+      <div class="task-row" data-goto="noten" data-id="${g.id}" style="cursor:pointer;">
+        <div style="flex:1;">
+          <div class="task-fach">${subjectDot(g.fach)}${escapeHtml(g.fach)}</div>
+          <div class="task-text">${escapeHtml(g.beschreibung || g.art || "Note")}</div>
+        </div>
+        <div class="value mono" style="font-size:18px;">${g.note}</div>
+      </div>`
+      )
+      .join("");
+  }
+  if (planResults.length) {
+    html += `<div class="section-title">Stundenplan</div>`;
+    html += planResults
+      .map(
+        (p) => `
+      <div class="task-row" data-goto="plan" style="cursor:pointer;">
+        <div style="flex:1;">
+          <div class="task-fach">${subjectDot(p.subject)}${escapeHtml(p.subject)}</div>
+          <div class="task-text">${escapeHtml(p.teacher || "")} · Raum ${escapeHtml(p.room || "–")}</div>
+        </div>
+        <div class="task-due later mono">${fmtDate(p.date)}</div>
+      </div>`
+      )
+      .join("");
+  }
+
+  resultsEl.innerHTML = html;
+  resultsEl.querySelectorAll("[data-goto]").forEach((row) => {
+    row.addEventListener("click", () => {
+      haptic("selection");
+      const target = row.dataset.goto;
+      const containerSel = target === "aufgaben" ? "#sub-aufgaben" : target === "noten" ? "#sub-noten" : null;
+      closeSearch();
+      document.querySelector('.tab[data-screen="schule"]').click();
+      document.querySelector(`#schule-subnav button[data-sub="${target}"]`).click();
+      if (row.dataset.id && containerSel) {
+        setTimeout(() => {
+          const el = document.querySelector(`${containerSel} [data-id="${row.dataset.id}"]`);
+          if (!el) return;
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          el.style.transition = "background 0.4s ease";
+          el.style.background = "var(--accent-soft)";
+          setTimeout(() => { el.style.background = ""; }, 1300);
+        }, 350);
+      }
+    });
+  });
+}
+
+// ==================== Globale Suche Ende ====================
 
 // ==================== App-Installation (PWA) ====================
 
