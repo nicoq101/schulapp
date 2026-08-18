@@ -6,7 +6,7 @@
 <title>Schulapp</title>
 <link rel="manifest" href="/manifest.json" />
 <meta name="theme-color" content="#000000" />
-<link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+<link rel="apple-touch-icon" href="/static/icon-192.png" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="stylesheet" href="/static/css/style.css" />
@@ -228,9 +228,7 @@
         <div style="display:flex; gap:10px; align-items:flex-end; margin-bottom: 16px;">
           <div class="field" style="flex:1; margin-bottom:0;">
             <label>Fach (optional)</label>
-            <select id="tutor-fach">
-              <option value="">Allgemein</option>
-            </select>
+            <input type="text" id="tutor-fach" list="fach-datalist" placeholder="Allgemein" autocomplete="off" />
           </div>
           <button class="icon-btn" id="tutor-clear-btn" aria-label="Verlauf löschen" title="Verlauf löschen">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z"/></svg>
@@ -267,10 +265,9 @@
         <div class="card" style="margin-bottom:20px;">
           <div class="field">
             <label>Fach</label>
-            <select id="flashcard-fach">
-              <option value="">Fach wählen</option>
-            </select>
+            <input type="text" id="flashcard-fach" list="fach-datalist" placeholder="z.B. Mathe" autocomplete="off" />
           </div>
+          <datalist id="fach-datalist"></datalist>
           <div class="field">
             <label>Thema</label>
             <input type="text" id="flashcard-thema" placeholder="z.B. Französische Revolution" />
