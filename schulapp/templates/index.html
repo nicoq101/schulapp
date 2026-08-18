@@ -78,6 +78,9 @@
       <h1 id="today-label">Heute</h1>
     </div>
     <div style="display:flex; gap:8px;">
+      <button class="icon-btn" id="search-btn" aria-label="Suche">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      </button>
       <button class="icon-btn" id="notif-btn" aria-label="Benachrichtigungen">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
         <span class="dot"></span>
@@ -195,6 +198,11 @@
         </div>
       </div>
 
+      <div class="section-title">Notentrend</div>
+      <div class="card" id="grade-trend-card">
+        <div id="grade-trend-chart"></div>
+      </div>
+
       <div class="section-title">Nach Fach</div>
       <div id="grades-by-subject"></div>
 
@@ -211,6 +219,11 @@
     </div>
 
     <div class="subscreen" id="sub-tutor">
+      <div class="segmented" id="tutor-subnav" style="margin-bottom: 16px;">
+        <button data-tutor-tab="chat" class="active">Chat</button>
+        <button data-tutor-tab="flashcards">Karteikarten</button>
+      </div>
+
       <div id="tutor-chat-ui">
         <div style="display:flex; gap:10px; align-items:flex-end; margin-bottom: 16px;">
           <div class="field" style="flex:1; margin-bottom:0;">
@@ -247,6 +260,27 @@
           <button class="icon-btn" id="tutor-send" aria-label="Senden">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg>
           </button>
+        </div>
+      </div>
+
+      <div id="tutor-flashcards-ui" style="display:none;">
+        <div class="card" style="margin-bottom:20px;">
+          <div class="field">
+            <label>Fach</label>
+            <select id="flashcard-fach">
+              <option value="">Fach wählen</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Thema</label>
+            <input type="text" id="flashcard-thema" placeholder="z.B. Französische Revolution" />
+          </div>
+          <button class="btn-primary" id="flashcard-generate-btn">Karteikarten erstellen</button>
+        </div>
+
+        <div class="section-title">Deine Sets</div>
+        <div id="flashcard-sets-list">
+          <div class="empty-state">Noch keine Karteikarten erstellt.</div>
         </div>
       </div>
     </div>
@@ -358,6 +392,35 @@
       <a href="/impressum" target="_blank" style="display:block; padding:10px 0; font-size:14px; color:var(--text);">Impressum</a>
     </div>
   </section>
+
+  <!-- ===================== SUCHE ===================== -->
+  <div class="sheet-backdrop" id="search-backdrop"></div>
+  <div class="sheet" id="search-sheet" style="max-height: 80vh; overflow-y: auto;">
+    <div class="field" style="margin-bottom: 4px;">
+      <input type="text" id="search-input" placeholder="Aufgaben, Noten, Fächer durchsuchen …" autocomplete="off" />
+    </div>
+    <div id="search-results" style="margin-top:14px;"></div>
+  </div>
+
+  <!-- ===================== KARTEIKARTEN LERNEN ===================== -->
+  <div class="sheet-backdrop" id="flashcard-study-backdrop"></div>
+  <div class="sheet" id="flashcard-study-sheet">
+    <h3 id="flashcard-study-title">Karteikarten</h3>
+    <div id="flashcard-progress" style="font-size:12px; color:var(--text-muted); margin-bottom:12px;">1 / 8</div>
+    <div id="flashcard-flip-card" class="card" style="min-height:150px; display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; margin-bottom:16px;">
+      <div id="flashcard-flip-text" class="value-transition" style="font-size:17px; font-weight:600; line-height:1.4;"></div>
+    </div>
+    <div style="display:flex; gap:10px;">
+      <button class="icon-btn" id="flashcard-prev-btn" aria-label="Vorherige Karte" style="width:44px; height:44px; flex-shrink:0;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <button class="btn-primary" id="flashcard-flip-btn">Antwort zeigen</button>
+      <button class="icon-btn" id="flashcard-next-btn" aria-label="Nächste Karte" style="width:44px; height:44px; flex-shrink:0;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+    </div>
+    <button class="icon-btn" id="flashcard-study-close" style="margin-top:14px; width:100%; border-radius:12px;">Schließen</button>
+  </div>
 
   <!-- ===================== iOS INSTALL SHEET ===================== -->
   <div class="sheet-backdrop" id="ios-install-sheet-backdrop"></div>
