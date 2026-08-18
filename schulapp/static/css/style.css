@@ -633,7 +633,17 @@ a { color: inherit; }
 .tutor-input-row .icon-btn { background: var(--accent); color: var(--accent-ink); box-shadow: none; flex-shrink: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation: none !important; transition: none !important; }
+  /* WICHTIG: nicht "animation: none" verwenden - Elemente wie .stagger-in starten
+     bewusst bei opacity:0 und werden erst durch die (forwards-fillende) Animation
+     sichtbar. "none" würde die Animation abschalten und sie für immer unsichtbar
+     lassen. Stattdessen läuft die Animation nahezu unsichtbar schnell bis zu ihrem
+     Ziel-Zustand durch - das Ergebnis stimmt, nur die Bewegung fällt weg. */
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ---------- Skeleton / Shimmer (Ladezustände) ---------- */
