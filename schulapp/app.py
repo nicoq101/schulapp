@@ -15,6 +15,7 @@ Einrichtung: siehe README.md im selben Ordner.
 import os
 import json
 import re
+import time
 import sqlite3
 import datetime as dt
 from pathlib import Path
@@ -646,28 +647,44 @@ KONTEXT ZUM NUTZER (nur verwenden, wenn gerade relevant – nicht aufdrängen)
 def call_tutor_ai(system_prompt, history):
     if not GEMINI_API_KEY:
         return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt in den Umgebungsvariablen)."
-    try:
-        contents = [
-            {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
-            for m in history
-        ]
-        resp = requests.post(
-            GEMINI_API_URL.format(model=TUTOR_MODEL),
-            headers={"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"},
-            json={
-                "systemInstruction": {"parts": [{"text": system_prompt}]},
-                "contents": contents,
-                "generationConfig": {"maxOutputTokens": 1000},
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        parts = data["candidates"][0]["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts)
-        return text.strip(), None
-    except (requests.exceptions.RequestException, KeyError, IndexError) as e:
-        return None, f"KI-Tutor gerade nicht erreichbar: {e}"
+
+    contents = [
+        {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
+        for m in history
+    ]
+
+    # Gemini antwortet gerade bei den kostenlosen Flash-Modellen häufiger mit 503
+    # (kurzzeitig überlastet). Das ist meist in 1-2 Sekunden vorbei, deshalb hier
+    # bis zu 3 Versuche mit kurzer, steigender Wartezeit, bevor der Fehler beim
+    # Nutzer ankommt.
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                GEMINI_API_URL.format(model=TUTOR_MODEL),
+                headers={"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"},
+                json={
+                    "systemInstruction": {"parts": [{"text": system_prompt}]},
+                    "contents": contents,
+                    "generationConfig": {"maxOutputTokens": 1000},
+                },
+                timeout=30,
+            )
+            if resp.status_code in (503, 429) and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            parts = data["candidates"][0]["content"]["parts"]
+            text = "".join(p.get("text", "") for p in parts)
+            return text.strip(), None
+        except (requests.exceptions.RequestException, KeyError, IndexError) as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+
+    return None, "Der KI-Tutor ist gerade überlastet. Bitte in ein paar Sekunden nochmal versuchen."
 
 
 # ==================== Scheduler-Jobs (laufen für ALLE Nutzer) ====================
