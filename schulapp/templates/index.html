@@ -10,14 +10,6 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <link rel="stylesheet" href="/static/css/style.css" />
-{% if adsense_client_id %}
-<script>
-  // Non-personalized Ads erzwingen (Google Child-Directed-Treatment) - Pflicht bei
-  // Zielgruppen, die (teilweise) minderjährig sind. Siehe: support.google.com/adsense
-  (window.adsbygoogle = window.adsbygoogle || []).requestNonPersonalizedAds = 1;
-</script>
-<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={{ adsense_client_id }}" crossorigin="anonymous"></script>
-{% endif %}
 </head>
 <body>
 <div id="auth-screen">
@@ -137,18 +129,6 @@
       <div class="skeleton" style="height:18px; width:70%; margin-bottom:10px;"></div>
       <div class="skeleton" style="height:18px; width:45%;"></div>
     </div>
-
-    {% if adsense_client_id and adsense_slot_dashboard %}
-    <div class="ad-slot">
-      <span class="ad-label">Anzeige</span>
-      <ins class="adsbygoogle"
-           style="display:block"
-           data-ad-client="{{ adsense_client_id }}"
-           data-ad-slot="{{ adsense_slot_dashboard }}"
-           data-ad-format="auto"
-           data-full-width-responsive="true"></ins>
-    </div>
-    {% endif %}
   </section>
 
   <!-- ===================== SCHULE (Aufgaben / Noten / Plan / Tutor) ===================== -->
@@ -172,18 +152,6 @@
 
       <div class="section-title">🟢 Später / Ohne Datum</div>
       <div class="card" id="tasks-later"></div>
-
-      {% if adsense_client_id and adsense_slot_aufgaben %}
-      <div class="ad-slot">
-        <span class="ad-label">Anzeige</span>
-        <ins class="adsbygoogle"
-             style="display:block"
-             data-ad-client="{{ adsense_client_id }}"
-             data-ad-slot="{{ adsense_slot_aufgaben }}"
-             data-ad-format="auto"
-             data-full-width-responsive="true"></ins>
-      </div>
-      {% endif %}
     </div>
 
     <div class="subscreen" id="sub-noten">
