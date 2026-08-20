@@ -54,7 +54,15 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "bitte-in-render-setzen-dev-only")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
-fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+try:
+    fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
+except (ValueError, Exception):
+    # Ein ungültig formatierter ENCRYPTION_KEY hat früher hier die komplette App beim
+    # Start crashen lassen (-> 503 bei jedem Request). Jetzt: WebUntis-Verknüpfung
+    # bleibt einfach deaktiviert, statt die ganze App lahmzulegen.
+    fernet = None
+    print("WARNUNG: ENCRYPTION_KEY ist ungültig formatiert (kein gültiger Fernet-Key) - "
+          "WebUntis-Verknüpfung ist deaktiviert. Key neu generieren, siehe README.")
 if not fernet:
     print("WARNUNG: ENCRYPTION_KEY ist nicht gesetzt - WebUntis-Verknüpfung ist deaktiviert, "
           "bis die Variable bei Render eingetragen wird.")
@@ -64,10 +72,6 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "gemini-flash-latest")  # Alias, zeigt immer auf die neueste Flash-Version
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Werbung (Google AdSense) - non-personalized Ads, da Zielgruppe teils minderjährig ist
-ADSENSE_CLIENT_ID = os.environ.get("ADSENSE_CLIENT_ID", "")  # z.B. "ca-pub-1234567890123456"
-ADSENSE_SLOT_DASHBOARD = os.environ.get("ADSENSE_SLOT_DASHBOARD", "")
-ADSENSE_SLOT_AUFGABEN = os.environ.get("ADSENSE_SLOT_AUFGABEN", "")
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
 
 
@@ -956,13 +960,11 @@ def set_security_headers(response):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' https://pagead2.googlesyndication.com https://www.googletagservices.com "
-        "https://googleads.g.doubleclick.net; "
+        "script-src 'self'; "
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src https://fonts.gstatic.com; "
-        "img-src 'self' data: https://*.googlesyndication.com https://*.doubleclick.net; "
-        "connect-src 'self' https://*.googlesyndication.com https://*.google.com; "
-        "frame-src https://googleads.g.doubleclick.net https://*.googlesyndication.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self';"
@@ -972,12 +974,7 @@ def set_security_headers(response):
 
 @app.route("/")
 def index():
-    return render_template(
-        "index.html",
-        adsense_client_id=ADSENSE_CLIENT_ID,
-        adsense_slot_dashboard=ADSENSE_SLOT_DASHBOARD,
-        adsense_slot_aufgaben=ADSENSE_SLOT_AUFGABEN,
-    )
+    return render_template("index.html")
 
 
 def admin_authorized():
