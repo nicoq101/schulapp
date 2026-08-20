@@ -548,24 +548,6 @@ a { color: inherit; }
   box-shadow: var(--shadow-sm);
 }
 
-/* ---------- Anzeigenplätze ---------- */
-
-.ad-slot {
-  margin-top: 20px;
-  padding: 10px;
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  min-height: 90px;
-}
-.ad-label {
-  display: block;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-tertiary);
-  margin-bottom: 6px;
-}
-
 /* ---------- KI-Lernassistent ---------- */
 
 .tutor-chat {
