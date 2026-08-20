@@ -758,7 +758,6 @@ function showAuthScreen() {
 function showApp() {
   document.getElementById("auth-screen").classList.add("hidden");
   document.getElementById("app").classList.add("visible");
-  initAds();
 }
 
 async function checkAuth() {
@@ -943,19 +942,9 @@ function populateTutorFaecher() {
   (state.grades || []).forEach((g) => faecher.add(g.fach));
   const sorted = [...faecher].sort();
 
-  const select = document.getElementById("tutor-fach");
-  const current = select.value;
-  select.innerHTML =
-    `<option value="">Allgemein</option>` +
-    sorted.map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
-  select.value = current && faecher.has(current) ? current : "";
-
-  const fcSelect = document.getElementById("flashcard-fach");
-  const fcCurrent = fcSelect.value;
-  fcSelect.innerHTML =
-    `<option value="">Fach wählen</option>` +
-    sorted.map((f) => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
-  fcSelect.value = fcCurrent && faecher.has(fcCurrent) ? fcCurrent : "";
+  document.getElementById("fach-datalist").innerHTML = sorted
+    .map((f) => `<option value="${escapeHtml(f)}"></option>`)
+    .join("");
 }
 
 function renderTutorMessage(m) {
@@ -991,7 +980,7 @@ async function sendTutorMessage(text) {
   if (!trimmed || tutorSending) return;
   tutorSending = true;
 
-  const fach = document.getElementById("tutor-fach").value;
+  const fach = document.getElementById("tutor-fach").value.trim();
   state.tutorHistory = [
     ...(state.tutorHistory || []),
     { role: "user", content: trimmed, level: tutorLevel, fach },
@@ -1091,7 +1080,7 @@ async function loadFlashcardSets() {
 }
 
 document.getElementById("flashcard-generate-btn").addEventListener("click", async () => {
-  const fach = document.getElementById("flashcard-fach").value;
+  const fach = document.getElementById("flashcard-fach").value.trim();
   const thema = document.getElementById("flashcard-thema").value.trim();
   if (!fach || !thema) {
     alert("Bitte Fach und Thema angeben.");
@@ -1358,18 +1347,6 @@ document.getElementById("ios-install-sheet-backdrop").addEventListener("click", 
 });
 
 updateInstallUI();
-
-// ==================== Werbung (AdSense) ====================
-
-function initAds() {
-  document.querySelectorAll("ins.adsbygoogle:not([data-ad-status])").forEach(() => {
-    try {
-      (window.adsbygoogle = window.adsbygoogle || []).push({});
-    } catch (e) {
-      // AdSense-Script evtl. noch nicht geladen oder geblockt (Adblocker) - kein Problem, still ignorieren
-    }
-  });
-}
 
 // ==================== Sticky Topbar (Blur beim Scrollen) ====================
 
