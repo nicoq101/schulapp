@@ -1318,6 +1318,24 @@ def api_grade_delete(grade_id):
 # ==================== Karteikarten ====================
 
 
+def _extract_json_block(text):
+    """Holt den ersten vollständigen JSON-Array-/Objekt-Block aus einer KI-Antwort,
+    auch wenn die KI sich nicht exakt an 'nur JSON' hält (Codeblock-Zäune,
+    erklärender Text davor/danach etc.)."""
+    text = text.strip()
+    text = re.sub(r"^\s*```[a-zA-Z]*\s*", "", text)
+    text = re.sub(r"\s*```\s*$", "", text)
+    text = text.strip()
+
+    array_match = re.search(r"\[.*\]", text, re.DOTALL)
+    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
+    if array_match and (not obj_match or array_match.start() <= obj_match.start()):
+        return array_match.group(0)
+    if obj_match:
+        return obj_match.group(0)
+    return text
+
+
 def generate_flashcards(fach, thema, anzahl=8):
     if not GEMINI_API_KEY:
         return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt)."
@@ -1335,16 +1353,29 @@ def generate_flashcards(fach, thema, anzahl=8):
     if error:
         return None, error
 
-    cleaned = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
     try:
-        raw_cards = json.loads(cleaned)
-        cards = [
-            {"frage": str(c["frage"]).strip(), "antwort": str(c["antwort"]).strip()}
-            for c in raw_cards
-            if c.get("frage") and c.get("antwort")
-        ]
+        parsed = json.loads(_extract_json_block(text))
     except Exception:
         return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
+
+    # Falls die KI trotz Anweisung ein Objekt statt eines reinen Arrays liefert
+    # (z.B. {"karteikarten": [...]}) - das erste Listenfeld darin verwenden.
+    if isinstance(parsed, dict):
+        raw_cards = next((v for v in parsed.values() if isinstance(v, list)), None)
+    else:
+        raw_cards = parsed
+
+    if not isinstance(raw_cards, list):
+        return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
+
+    cards = []
+    for c in raw_cards:
+        if not isinstance(c, dict):
+            continue
+        frage = c.get("frage") or c.get("question") or c.get("q")
+        antwort = c.get("antwort") or c.get("answer") or c.get("a")
+        if frage and antwort:
+            cards.append({"frage": str(frage).strip(), "antwort": str(antwort).strip()})
 
     if not cards:
         return None, "Keine Karteikarten erzeugt. Bitte nochmal versuchen."
