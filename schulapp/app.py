@@ -644,7 +644,7 @@ KONTEXT ZUM NUTZER (nur verwenden, wenn gerade relevant – nicht aufdrängen)
 {build_tutor_context(user, fach)}"""
 
 
-def call_tutor_ai(system_prompt, history):
+def call_tutor_ai(system_prompt, history, max_tokens=1000):
     if not GEMINI_API_KEY:
         return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt in den Umgebungsvariablen)."
 
@@ -666,7 +666,7 @@ def call_tutor_ai(system_prompt, history):
                 json={
                     "systemInstruction": {"parts": [{"text": system_prompt}]},
                     "contents": contents,
-                    "generationConfig": {"maxOutputTokens": 1000},
+                    "generationConfig": {"maxOutputTokens": max_tokens},
                 },
                 timeout=30,
             )
@@ -1336,6 +1336,23 @@ def _extract_json_block(text):
     return text
 
 
+def _extract_qa_pairs_fallback(text):
+    """Letzter Rettungsanker: zieht frage/antwort-Paare direkt per Regex aus dem Text,
+    auch wenn kein gültiges JSON vorliegt (z.B. abgeschnittene Antwort oder nicht
+    escapte Anführungszeichen im Antworttext)."""
+    pattern = re.compile(
+        r'"(?:frage|question|q)"\s*:\s*"(.*?)"\s*,\s*"(?:antwort|answer|a)"\s*:\s*"(.*?)"\s*(?:,|\})',
+        re.IGNORECASE | re.DOTALL,
+    )
+    cards = []
+    for frage, antwort in pattern.findall(text):
+        frage = frage.replace('\\"', '"').replace("\\n", " ").strip()
+        antwort = antwort.replace('\\"', '"').replace("\\n", " ").strip()
+        if frage and antwort:
+            cards.append({"frage": frage, "antwort": antwort})
+    return cards
+
+
 def generate_flashcards(fach, thema, anzahl=8):
     if not GEMINI_API_KEY:
         return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt)."
@@ -1344,41 +1361,45 @@ def generate_flashcards(fach, thema, anzahl=8):
         f"Du erstellst Karteikarten zum Lernen für Schüler:innen. Erzeuge genau {anzahl} Karteikarten "
         f'zum Fach "{fach}", Thema "{thema}". Antworte AUSSCHLIESSLICH mit einem JSON-Array, keine '
         "Erklärung, keine Markdown-Codeblöcke, kein Text davor oder danach. Format: "
-        '[{"frage": "...", "antwort": "..."}]. Fragen kurz und präzise, Antworten kurz und korrekt, '
-        "altersgerecht für Schüler:innen."
+        '[{"frage": "...", "antwort": "..."}]. Fragen kurz und präzise, Antworten SEHR kurz (max. 1 Satz), '
+        "altersgerecht für Schüler:innen. Nutze in den Texten keine Anführungszeichen."
     )
+    # Mehr Tokens als beim normalen Chat, damit die Antwort bei 8 Karten nicht
+    # mitten im JSON abgeschnitten wird.
     text, error = call_tutor_ai(
-        system_prompt, [{"role": "user", "content": f"Erstelle die Karteikarten zu {thema} ({fach})."}]
+        system_prompt,
+        [{"role": "user", "content": f"Erstelle die Karteikarten zu {thema} ({fach})."}],
+        max_tokens=2048,
     )
     if error:
         return None, error
 
+    cards = []
     try:
         parsed = json.loads(_extract_json_block(text))
+        raw_cards = (
+            next((v for v in parsed.values() if isinstance(v, list)), None)
+            if isinstance(parsed, dict)
+            else parsed
+        )
+        if isinstance(raw_cards, list):
+            for c in raw_cards:
+                if not isinstance(c, dict):
+                    continue
+                frage = c.get("frage") or c.get("question") or c.get("q")
+                antwort = c.get("antwort") or c.get("answer") or c.get("a")
+                if frage and antwort:
+                    cards.append({"frage": str(frage).strip(), "antwort": str(antwort).strip()})
     except Exception:
-        return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
-
-    # Falls die KI trotz Anweisung ein Objekt statt eines reinen Arrays liefert
-    # (z.B. {"karteikarten": [...]}) - das erste Listenfeld darin verwenden.
-    if isinstance(parsed, dict):
-        raw_cards = next((v for v in parsed.values() if isinstance(v, list)), None)
-    else:
-        raw_cards = parsed
-
-    if not isinstance(raw_cards, list):
-        return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
-
-    cards = []
-    for c in raw_cards:
-        if not isinstance(c, dict):
-            continue
-        frage = c.get("frage") or c.get("question") or c.get("q")
-        antwort = c.get("antwort") or c.get("answer") or c.get("a")
-        if frage and antwort:
-            cards.append({"frage": str(frage).strip(), "antwort": str(antwort).strip()})
+        pass
 
     if not cards:
-        return None, "Keine Karteikarten erzeugt. Bitte nochmal versuchen."
+        # JSON war ungültig oder abgeschnitten - Frage/Antwort-Paare notfalls direkt
+        # per Regex aus dem Rohtext ziehen, statt komplett aufzugeben.
+        cards = _extract_qa_pairs_fallback(text)
+
+    if not cards:
+        return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
     return cards, None
 
 
