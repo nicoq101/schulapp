@@ -51,11 +51,14 @@ ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
 fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
 
 
-def try_untis_login(untis_username, untis_password):
+def try_untis_login(untis_username, untis_password, server=None, school=None):
     try:
         s = webuntis.Session(
-            server=UNTIS_SERVER, username=untis_username, password=untis_password,
-            school=UNTIS_SCHOOL, useragent="Schulapp/2.0",
+            server=(server or UNTIS_SERVER).strip(),
+            username=untis_username,
+            password=untis_password,
+            school=(school or UNTIS_SCHOOL).strip(),
+            useragent="Schulapp/2.1",
         ).login()
         s.logout()
         return True, None
@@ -268,6 +271,8 @@ DEFAULT_SETTINGS = {
     "theme": "system",
     "klasse": "",
     "notenskala": "unterstufe",
+    "untis_server": UNTIS_SERVER,
+    "untis_school": UNTIS_SCHOOL,
 }
 
 
@@ -283,12 +288,14 @@ def ensure_default_settings(user_id):
 
 
 def untis_login(user):
+    server = get_setting(user["id"], "untis_server", UNTIS_SERVER)
+    school = get_setting(user["id"], "untis_school", UNTIS_SCHOOL)
     return webuntis.Session(
-        server=UNTIS_SERVER,
+        server=server,
         username=user["untis_username"],
         password=decrypt_untis_password(user["untis_password_enc"]),
-        school=UNTIS_SCHOOL,
-        useragent="Schulapp/2.0",
+        school=school,
+        useragent="Schulapp/2.1",
     ).login()
 
 
@@ -575,6 +582,8 @@ def api_register():
     display_name = data.get("display_name", "").strip() or username
     untis_username = data.get("untis_username", "").strip()
     untis_password = data.get("untis_password", "")
+    untis_server = data.get("untis_server", UNTIS_SERVER).strip() or UNTIS_SERVER
+    untis_school = data.get("untis_school", UNTIS_SCHOOL).strip() or UNTIS_SCHOOL
 
     if not username or not password:
         return jsonify({"ok": False, "error": "Bitte Benutzername und Passwort ausfüllen."}), 400
@@ -597,7 +606,7 @@ def api_register():
     conn.close()
 
     if has_untis:
-        ok, err = try_untis_login(untis_username, untis_password)
+        ok, err = try_untis_login(untis_username, untis_password, untis_server, untis_school)
         if not ok:
             return jsonify({"ok": False, "error": f"WebUntis-Zugangsdaten konnten nicht bestätigt werden. ({err})"}), 400
 
@@ -613,6 +622,8 @@ def api_register():
     conn.close()
 
     ensure_default_settings(user_id)
+    set_setting(user_id, "untis_server", untis_server)
+    set_setting(user_id, "untis_school", untis_school)
     reschedule_all_reminders()
     session["user_id"] = user_id
     return jsonify({"ok": True, "username": username, "display_name": display_name})
@@ -927,6 +938,75 @@ def api_settings():
     settings["display_name"] = user["display_name"]
     return jsonify(settings)
 
+
+
+@app.route("/api/untis", methods=["GET", "POST", "DELETE"])
+@login_required
+def api_untis():
+    uid = session["user_id"]
+    user = current_user()
+
+    if request.method == "GET":
+        return jsonify({
+            "connected": bool(user.get("untis_username")),
+            "username": user.get("untis_username") or "",
+            "server": get_setting(uid, "untis_server", UNTIS_SERVER),
+            "school": get_setting(uid, "untis_school", UNTIS_SCHOOL),
+        })
+
+    if request.method == "DELETE":
+        conn = get_db()
+        conn.execute("UPDATE users SET untis_username = '', untis_password_enc = '' WHERE id = ?", (uid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+
+    data = request.get_json() or {}
+    untis_username = data.get("username", "").strip()
+    untis_password = data.get("password", "")
+    untis_server = data.get("server", UNTIS_SERVER).strip() or UNTIS_SERVER
+    untis_school = data.get("school", UNTIS_SCHOOL).strip() or UNTIS_SCHOOL
+
+    if not untis_username or not untis_password:
+        return jsonify({"ok": False, "error": "Bitte WebUntis-Benutzername und Passwort ausfüllen."}), 400
+
+    ok, err = try_untis_login(untis_username, untis_password, untis_server, untis_school)
+    if not ok:
+        return jsonify({"ok": False, "error": f"WebUntis-Verbindung fehlgeschlagen: {err}"}), 400
+
+    conn = get_db()
+    taken = conn.execute(
+        "SELECT 1 FROM users WHERE lower(untis_username) = lower(?) AND id != ? AND untis_username != ''",
+        (untis_username, uid),
+    ).fetchone()
+    if taken:
+        conn.close()
+        return jsonify({"ok": False, "error": "Dieser WebUntis-Zugang ist bereits mit einem anderen App-Account verbunden."}), 400
+
+    enc_pw = fernet.encrypt(untis_password.encode()).decode() if fernet else untis_password
+    conn.execute(
+        "UPDATE users SET untis_username = ?, untis_password_enc = ? WHERE id = ?",
+        (untis_username, enc_pw, uid),
+    )
+    conn.commit()
+    conn.close()
+    set_setting(uid, "untis_server", untis_server)
+    set_setting(uid, "untis_school", untis_school)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/untis/test", methods=["POST"])
+@login_required
+def api_untis_test():
+    user = current_user()
+    if not user.get("untis_username"):
+        return jsonify({"ok": False, "error": "Noch kein WebUntis-Konto verbunden."}), 400
+    try:
+        s = untis_login(user)
+        s.logout()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 @app.route("/api/notifications")
 @login_required
