@@ -52,6 +52,14 @@
           <label>WebUntis-Passwort</label>
           <input type="password" id="auth-untis-password" placeholder="Dein WebUntis-Passwort" />
         </div>
+        <div class="field">
+          <label>WebUntis-Server</label>
+          <input type="text" id="auth-untis-server" placeholder="z.B. csgb.webuntis.com" />
+        </div>
+        <div class="field">
+          <label>Schulname / school-Parameter</label>
+          <input type="text" id="auth-untis-school" placeholder="z.B. csgb" />
+        </div>
       </div>
     </div>
 
@@ -190,6 +198,18 @@
         <input type="time" id="new-time-input" />
       </div>
       <button class="btn-primary" id="add-time-btn">Zeit hinzufügen</button>
+    </div>
+
+    <div class="section-title">WebUntis</div>
+    <div class="card">
+      <div class="field"><label>WebUntis-Benutzername</label><input type="text" id="setting-untis-username" placeholder="Dein WebUntis-Login" /></div>
+      <div class="field"><label>WebUntis-Passwort</label><input type="password" id="setting-untis-password" placeholder="Nur zum Ändern neu eingeben" /></div>
+      <div class="field"><label>WebUntis-Server</label><input type="text" id="setting-untis-server" placeholder="z.B. csgb.webuntis.com" /></div>
+      <div class="field"><label>Schulname / school-Parameter</label><input type="text" id="setting-untis-school" placeholder="z.B. csgb" /></div>
+      <div class="sub" id="untis-status" style="margin: 6px 0 12px;">Status wird geladen …</div>
+      <button class="btn-primary" id="save-untis-btn">WebUntis verbinden / aktualisieren</button>
+      <button class="btn-primary" id="test-untis-btn" style="margin-top:8px;">Verbindung testen</button>
+      <button class="btn-primary" id="disconnect-untis-btn" style="margin-top:8px;">WebUntis trennen</button>
     </div>
 
     <div class="section-title">Personalisierung</div>
