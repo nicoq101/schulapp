@@ -2,30 +2,20 @@
 
 let state = {
   timetable: [],
+  weekTimetable: [],
   exams: [],
   tasks: [],
   settings: {},
   notifications: [],
+  grades: [],
 };
+
+let planMode = "tage"; // "tage" oder "woche"
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
-// Leichtes haptisches Feedback, wo das Gerät es unterstützt (Android/Desktop;
-// iOS blockiert die Vibration API in Safari, daher übernimmt dort die
-// visuelle Press-Animation aus dem CSS die "Haptik").
-// Web Vibration API kann echte Taptic-Engine-Stufen nur annähern (kurze
-// Impulse verschiedener Länge/Muster), nicht exakt nachbilden.
-const HAPTIC_PATTERNS = {
-  light: 6,       // normale Buttons, Tab-Wechsel
-  medium: 12,      // wichtige Aktionen (Speichern, Löschen)
-  selection: 4,    // Picker, Segmented Control, Toggles
-  success: [10, 30, 10], // erfolgreiche Aktion (z.B. Aufgabe erledigt)
-  warning: [15, 40, 15, 40, 15], // Fehler / kritische Aktion
-};
-function haptic(kind = "light") {
-  if (!navigator.vibrate) return;
-  const pattern = typeof kind === "number" ? kind : (HAPTIC_PATTERNS[kind] || HAPTIC_PATTERNS.light);
-  navigator.vibrate(pattern);
+function haptic(ms = 8) {
+  if (navigator.vibrate) navigator.vibrate(ms);
 }
 
 // ==================== Hilfsfunktionen ====================
@@ -50,72 +40,60 @@ function weekdayName(iso) {
   return WEEKDAYS[(d.getDay() + 6) % 7];
 }
 
+function mondayOfWeek(isoDate) {
+  const d = new Date(isoDate + "T00:00:00");
+  const day = (d.getDay() + 6) % 7; // 0 = Montag
+  d.setDate(d.getDate() - day);
+  return d.toISOString().slice(0, 10);
+}
+
+function addDaysToISO(iso, days) {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 async function api(path, options = {}) {
-  try {
-    const res = await fetch(path, {
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      ...options,
-    });
-    if (res.status === 401) {
-      // Session abgelaufen/ungültig (z.B. Account wurde gelöscht) - zurück zum Login
-      showAuthScreen();
-      return { ok: false, error: "Sitzung abgelaufen. Bitte erneut anmelden." };
-    }
-    try {
-      return await res.json();
-    } catch {
-      return { ok: false, error: `Unerwartete Antwort vom Server (${res.status}).` };
-    }
-  } catch (e) {
-    return { ok: false, error: "Keine Verbindung zum Server. Bitte Internetverbindung prüfen." };
-  }
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    ...options,
+  });
+  return res.json();
 }
 
 // ==================== Navigation ====================
 
-function updateFabVisibility() {
-  const activeSub = document.querySelector(".subscreen.active");
-  const hide = activeSub && activeSub.id === "sub-tutor";
-  document.getElementById("fab-add").style.display = hide ? "none" : "flex";
-}
-
 document.querySelectorAll(".tab").forEach((tab) => {
   tab.addEventListener("click", () => {
-    haptic("selection");
+    haptic(6);
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
     document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
     tab.classList.add("active");
     document.getElementById(`screen-${tab.dataset.screen}`).classList.add("active");
-    updateFabVisibility();
   });
-});
-
-document.getElementById("schule-subnav").addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  haptic("selection");
-  document.querySelectorAll("#schule-subnav button").forEach((b) => b.classList.remove("active"));
-  document.querySelectorAll(".subscreen").forEach((s) => s.classList.remove("active"));
-  btn.classList.add("active");
-  document.getElementById(`sub-${btn.dataset.sub}`).classList.add("active");
-  updateFabVisibility();
 });
 
 // ==================== Daten laden ====================
 
 async function loadAll() {
-  const [timetable, exams, tasks, settings, notifications, grades, tutorHistory] = await Promise.all([
+  const [timetable, exams, tasks, settings, notifications, grades] = await Promise.all([
     api("/api/timetable"),
     api("/api/exams"),
     api("/api/tasks"),
     api("/api/settings"),
     api("/api/notifications"),
     api("/api/grades"),
-    api("/api/tutor/history"),
   ]);
-  state = { timetable, exams, tasks, settings, notifications, grades, tutorHistory };
+  state = { ...state, timetable, exams, tasks, settings, notifications, grades };
   renderAll();
+}
+
+async function loadWeekTimetable() {
+  const monday = mondayOfWeek(todayISO());
+  const sunday = addDaysToISO(monday, 6);
+  state.weekTimetable = await api(`/api/timetable?start=${monday}&end=${sunday}`);
+  renderPlan();
 }
 
 function renderAll() {
@@ -127,8 +105,6 @@ function renderAll() {
   renderEinstellungen();
   renderNotifications();
   renderNoten(state.grades || []);
-  populateTutorFaecher();
-  renderTutorChat(state.tutorHistory || []);
 }
 
 // ==================== Begrüßung ====================
@@ -143,20 +119,6 @@ function renderGreeting() {
 
 // ==================== Dashboard ====================
 
-// Zeigt neue Werte mit einer kurzen, sanften Blend-Transition statt hartem Textwechsel
-// (z.B. Dashboard-Kacheln, Notenschnitt) - nur wenn sich der Wert wirklich ändert.
-function setValueAnimated(id, newValue) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  const text = String(newValue);
-  if (el.textContent === text) return;
-  el.classList.add("value-transition", "updating");
-  setTimeout(() => {
-    el.textContent = text;
-    el.classList.remove("updating");
-  }, 120);
-}
-
 function renderDashboard() {
   const today = todayISO();
   const now = new Date();
@@ -166,38 +128,29 @@ function renderDashboard() {
     .filter((p) => p.date === today)
     .sort((a, b) => a.start.localeCompare(b.start));
 
-  // Rail
   const rail = document.getElementById("dashboard-rail");
   if (todaysLessons.length === 0) {
     rail.innerHTML = `<div class="empty-state"><div class="display">Heute keine Stunden 🎉</div>Genieß den Tag.</div>`;
   } else {
-    rail.innerHTML = todaysLessons.map((p, i) => renderRailItem(p, nowMinutes, i)).join("");
+    rail.innerHTML = todaysLessons.map((p) => renderRailItem(p, nowMinutes)).join("");
   }
 
-  // Tiles: nächste Stunde
   const upcoming = todaysLessons.find((p) => toMinutes(p.start) > nowMinutes && p.code !== "cancelled");
-  setValueAnimated("tile-next", upcoming ? upcoming.subject : "–");
+  document.getElementById("tile-next").textContent = upcoming ? upcoming.subject : "–";
 
-  // Tiles: verbleibende Stunden
   const remaining = todaysLessons.filter((p) => toMinutes(p.end) > nowMinutes && p.code !== "cancelled").length;
-  setValueAnimated("tile-remaining", remaining);
+  document.getElementById("tile-remaining").textContent = remaining;
 
-  // Tiles: offene Aufgaben
-  setValueAnimated("tile-tasks", state.tasks.length);
+  document.getElementById("tile-tasks").textContent = state.tasks.length;
 
-  // Tiles: nächste Klausur (automatisch von WebUntis + manuell eingetragen)
   const manualExamsForTile = state.tasks
     .filter((t) => t.typ === "pruefung" && t.faellig)
     .map((t) => ({ date: t.faellig }));
   const nextExam = [...state.exams, ...manualExamsForTile].sort((a, b) => a.date.localeCompare(b.date))[0];
-  if (nextExam) {
-    const days = daysUntil(nextExam.date);
-    setValueAnimated("tile-exam", days === 0 ? "Heute" : `${days}d`);
-  } else {
-    setValueAnimated("tile-exam", "–");
-  }
+  document.getElementById("tile-exam").textContent = nextExam
+    ? (daysUntil(nextExam.date) === 0 ? "Heute" : `${daysUntil(nextExam.date)}d`)
+    : "–";
 
-  // Bald fällig
   const soon = state.tasks
     .filter((t) => t.faellig && t.faellig <= addDaysISO(2))
     .sort((a, b) => (a.faellig || "").localeCompare(b.faellig || ""));
@@ -222,9 +175,9 @@ function daysUntil(iso) {
   return Math.round((target - today) / 86400000);
 }
 
-function renderRailItem(p, nowMinutes, i = 0) {
+function renderRailItem(p, nowMinutes) {
   const isNow = nowMinutes >= toMinutes(p.start) && nowMinutes < toMinutes(p.end);
-  const classes = ["rail-item", "stagger-in"];
+  const classes = ["rail-item"];
   if (isNow) classes.push("now");
   if (p.code === "cancelled") classes.push("cancelled");
   if (p.code === "irregular") classes.push("irregular");
@@ -234,7 +187,7 @@ function renderRailItem(p, nowMinutes, i = 0) {
   else if (p.code === "irregular") badge = `<span class="badge irregular">Vertretung</span>`;
 
   return `
-    <div class="${classes.join(" ")}" style="--i:${i}; border-left: 3px solid ${subjectColor(p.subject)};">
+    <div class="${classes.join(" ")}">
       <div class="rail-time mono">${p.start} – ${p.end}</div>
       <div class="rail-subject">${p.subject}${badge}</div>
       <div class="rail-meta">Raum ${p.room} · ${p.teacher}</div>
@@ -270,16 +223,15 @@ function fillTaskGroup(id, tasks) {
     el.innerHTML = `<div class="empty-state">Nichts hier.</div>`;
     return;
   }
-  el.innerHTML = tasks.map((t, i) => renderTaskRow(t, i)).join("");
+  el.innerHTML = tasks.map(renderTaskRow).join("");
   attachTaskHandlers(el);
 }
 
-function renderTaskRow(t, i = 0) {
+function renderTaskRow(t) {
   let urgency = "later";
   if (t.faellig) {
     const d = daysUntil(t.faellig);
     if (d <= 0) urgency = "urgent";
-    else if (d === 1) urgency = "soon";
     else if (d <= 7) urgency = "soon";
     else urgency = "later";
   }
@@ -287,10 +239,10 @@ function renderTaskRow(t, i = 0) {
   const dueText = t.faellig ? fmtDate(t.faellig) : "kein Datum";
 
   return `
-    <div class="task-row stagger-in" style="--i:${i}" data-id="${t.id}">
+    <div class="task-row" data-id="${t.id}">
       <button class="check" data-action="done">✓</button>
       <div style="flex:1;">
-        <div class="task-fach">${subjectDot(t.fach)}${emoji} ${escapeHtml(t.fach)}</div>
+        <div class="task-fach">${emoji} ${escapeHtml(t.fach)}</div>
         <div class="task-text">${escapeHtml(t.text)}</div>
         <div class="task-due ${urgency}">${dueText}</div>
       </div>
@@ -303,11 +255,8 @@ function renderTaskRow(t, i = 0) {
 function attachTaskHandlers(container) {
   container.querySelectorAll('[data-action="done"]').forEach((btn) => {
     btn.addEventListener("click", async () => {
-      haptic("success");
-      btn.classList.add("done", "success-ring");
+      haptic(12);
       const id = btn.closest(".task-row").dataset.id;
-      // Kurz die Erfolgs-Animation zeigen, bevor die Zeile aus der Liste verschwindet
-      await new Promise((resolve) => setTimeout(resolve, 220));
       await api(`/api/tasks/${id}`, { method: "PATCH", body: JSON.stringify({ erledigt: 1 }) });
       state.tasks = state.tasks.filter((t) => String(t.id) !== id);
       renderAll();
@@ -315,7 +264,6 @@ function attachTaskHandlers(container) {
   });
   container.querySelectorAll('[data-action="delete"]').forEach((btn) => {
     btn.addEventListener("click", async () => {
-      haptic("medium");
       const id = btn.closest(".task-row").dataset.id;
       await api(`/api/tasks/${id}`, { method: "DELETE" });
       state.tasks = state.tasks.filter((t) => String(t.id) !== id);
@@ -330,23 +278,61 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// ==================== Stundenplan (Woche) ====================
+// ==================== Stundenplan (Tage / Ganze Woche) ====================
+
+document.getElementById("plan-mode-segmented").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  haptic(6);
+  planMode = btn.dataset.mode;
+  document.querySelectorAll("#plan-mode-segmented button").forEach((b) => b.classList.toggle("active", b === btn));
+  document.getElementById("week-summary-card").style.display = planMode === "woche" ? "flex" : "none";
+
+  if (planMode === "woche" && state.weekTimetable.length === 0) {
+    await loadWeekTimetable();
+  } else {
+    renderPlan();
+  }
+});
 
 function renderPlan() {
+  const source = planMode === "woche" ? state.weekTimetable : state.timetable;
+
   const byDay = {};
-  for (const p of state.timetable) {
+  for (const p of source) {
     (byDay[p.date] ||= []).push(p);
   }
 
-  const days = Object.keys(byDay).sort().slice(0, 5);
   const container = document.getElementById("week-container");
 
-  if (days.length === 0) {
+  let dayKeys;
+  if (planMode === "woche") {
+    const monday = mondayOfWeek(todayISO());
+    dayKeys = Array.from({ length: 7 }, (_, i) => addDaysToISO(monday, i));
+  } else {
+    dayKeys = Object.keys(byDay).sort().slice(0, 5);
+  }
+
+  if (planMode === "woche") {
+    const allLessons = source.filter((p) => p.code !== "cancelled");
+    const cancelled = source.filter((p) => p.code === "cancelled");
+    document.getElementById("week-hours-count").textContent = allLessons.length;
+    document.getElementById("week-cancelled-count").textContent = cancelled.length;
+  }
+
+  if (dayKeys.length === 0) {
     container.innerHTML = `<div class="empty-state">Kein Stundenplan verfügbar (evtl. Ferien).</div>`;
   } else {
-    container.innerHTML = days
+    container.innerHTML = dayKeys
       .map((date) => {
-        const lessons = byDay[date].sort((a, b) => a.start.localeCompare(b.start));
+        const lessons = (byDay[date] || []).sort((a, b) => a.start.localeCompare(b.start));
+        if (lessons.length === 0) {
+          return `
+            <div class="day-block empty-day">
+              <h3>${weekdayName(date)}, ${fmtDate(date)}</h3>
+              <div class="day-empty-hint">Keine Stunden.</div>
+            </div>`;
+        }
         return `
           <div class="day-block">
             <h3>${weekdayName(date)}, ${fmtDate(date)}</h3>
@@ -446,7 +432,7 @@ function renderEinstellungen() {
 
 document.querySelectorAll(".switch[data-setting]").forEach((sw) => {
   sw.addEventListener("click", async () => {
-    haptic("selection");
+    haptic(6);
     const key = sw.dataset.setting;
     const newVal = !sw.classList.contains("on");
     sw.classList.toggle("on", newVal);
@@ -462,40 +448,6 @@ document.getElementById("save-profile-btn").addEventListener("click", async () =
   state.settings.name = name;
   state.settings.klasse = klasse;
   renderGreeting();
-});
-
-document.getElementById("pw-new").addEventListener("input", (e) => {
-  document.getElementById("pw-new-hint").classList.toggle("ok", isPasswordValid(e.target.value));
-});
-
-document.getElementById("pw-change-btn").addEventListener("click", async () => {
-  const errorBox = document.getElementById("pw-change-error");
-  errorBox.classList.remove("visible");
-
-  const oldPw = document.getElementById("pw-old").value;
-  const newPw = document.getElementById("pw-new").value;
-
-  if (!isPasswordValid(newPw)) {
-    errorBox.textContent = "Neues Passwort braucht mind. 8 Zeichen und ein Sonderzeichen.";
-    errorBox.classList.add("visible");
-    return;
-  }
-
-  const result = await api("/api/password", {
-    method: "POST",
-    body: JSON.stringify({ old_password: oldPw, new_password: newPw }),
-  });
-
-  if (result.ok) {
-    document.getElementById("pw-old").value = "";
-    document.getElementById("pw-new").value = "";
-    document.getElementById("pw-new-hint").classList.remove("ok");
-    haptic("success");
-  } else {
-    haptic("warning");
-    errorBox.textContent = result.error || "Passwort konnte nicht geändert werden.";
-    errorBox.classList.add("visible");
-  }
 });
 
 function renderTimeChips() {
@@ -566,7 +518,7 @@ document.getElementById("notif-backdrop").addEventListener("click", () => {
   document.getElementById("notif-sheet").classList.remove("open");
 });
 
-// ==================== Neue Aufgabe / Klausur ====================
+// ==================== Neue Aufgabe / Klausur / Note ====================
 
 let newTaskTyp = "hausaufgabe";
 
@@ -614,6 +566,7 @@ document.getElementById("save-task-btn").addEventListener("click", async () => {
   document.getElementById("new-fach").value = "";
   closeAddSheet();
   await loadAll();
+  if (planMode === "woche") await loadWeekTimetable();
 });
 
 // ==================== Push-Benachrichtigungen ====================
@@ -670,9 +623,7 @@ document.getElementById("test-push-btn").addEventListener("click", async () => {
   const btn = document.getElementById("test-push-btn");
   btn.textContent = "Sende …";
   const result = await api("/api/test-push", { method: "POST" });
-  btn.textContent = result.ok
-    ? "Gesendet! Kommt sie an?"
-    : result.error || "Fehler";
+  btn.textContent = result.ok ? "Gesendet! Kommt sie an?" : result.error || "Fehler";
   setTimeout(() => (btn.textContent = "Testnachricht senden"), 3000);
 });
 
@@ -686,17 +637,8 @@ document.querySelectorAll("#auth-mode button").forEach((btn) => {
     btn.classList.add("active");
     authMode = btn.dataset.mode;
     document.getElementById("register-fields").style.display = authMode === "register" ? "block" : "none";
-    document.getElementById("pw-hint").style.display = authMode === "register" ? "block" : "none";
     document.getElementById("auth-submit").textContent = authMode === "register" ? "Account erstellen" : "Anmelden";
   });
-});
-
-function isPasswordValid(pw) {
-  return pw.length >= 8 && /[^A-Za-z0-9]/.test(pw);
-}
-
-document.getElementById("auth-password").addEventListener("input", (e) => {
-  document.getElementById("pw-hint").classList.toggle("ok", isPasswordValid(e.target.value));
 });
 
 document.getElementById("untis-toggle").addEventListener("click", () => {
@@ -714,13 +656,6 @@ document.getElementById("auth-submit").addEventListener("click", async () => {
     username: document.getElementById("auth-username").value.trim(),
     password: document.getElementById("auth-password").value,
   };
-
-  if (authMode === "register" && !isPasswordValid(body.password)) {
-    errorBox.textContent = "Passwort braucht mind. 8 Zeichen und ein Sonderzeichen.";
-    errorBox.classList.add("visible");
-    return;
-  }
-
   if (authMode === "register") {
     body.display_name = document.getElementById("auth-display-name").value.trim();
     if (document.getElementById("untis-toggle").classList.contains("on")) {
@@ -747,13 +682,9 @@ document.getElementById("auth-submit").addEventListener("click", async () => {
 
 document.getElementById("logout-btn").addEventListener("click", async () => {
   await api("/api/logout", { method: "POST" });
-  showAuthScreen();
-});
-
-function showAuthScreen() {
   document.getElementById("app").classList.remove("visible");
   document.getElementById("auth-screen").classList.remove("hidden");
-}
+});
 
 function showApp() {
   document.getElementById("auth-screen").classList.add("hidden");
@@ -783,83 +714,6 @@ function switchTaskType(typ) {
   if (isNote) applyNotenskala(state.settings.notenskala || "unterstufe");
 }
 
-// ==================== Fach-Farben ====================
-
-// iOS-Systemfarben-Palette - jedes Fach bekommt deterministisch (per Hash des
-// Namens) immer dieselbe Farbe, ganz ohne eigene Zuordnung pflegen zu müssen.
-const SUBJECT_PALETTE = [
-  "#FF3B30", "#FF9500", "#FFCC00", "#34C759", "#00C7BE",
-  "#30B0C7", "#32ADE6", "#007AFF", "#5856D6", "#AF52DE", "#FF2D55",
-];
-function subjectColor(fach) {
-  let hash = 0;
-  for (let i = 0; i < fach.length; i++) hash = (hash * 31 + fach.charCodeAt(i)) >>> 0;
-  return SUBJECT_PALETTE[hash % SUBJECT_PALETTE.length];
-}
-function subjectDot(fach) {
-  return `<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${subjectColor(fach)}; margin-right:6px; flex-shrink:0;"></span>`;
-}
-
-function renderGradeTrend(grades) {
-  const container = document.getElementById("grade-trend-chart");
-  const skala = state.settings.notenskala || "unterstufe";
-  const dated = grades.filter((g) => g.datum).sort((a, b) => a.datum.localeCompare(b.datum));
-
-  if (dated.length < 2) {
-    container.innerHTML = `<div class="empty-state" style="padding:16px 4px;">Mind. 2 Noten mit Datum nötig für einen Trend.</div>`;
-    return;
-  }
-
-  // Laufender gewichteter Schnitt nach jeder neuen Note - zeigt die Entwicklung
-  // über die Zeit statt nur einzelne, verrauschte Werte.
-  let wSum = 0, wTotal = 0;
-  const points = dated.map((g) => {
-    wSum += g.note * g.gewichtung;
-    wTotal += g.gewichtung;
-    return wSum / wTotal;
-  });
-
-  const width = 300, height = 110, pad = 10;
-  const min = Math.min(...points), max = Math.max(...points);
-  const range = max - min || 1;
-
-  // Bei "unterstufe" ist eine niedrigere Zahl besser - Achse spiegeln, damit
-  // "nach oben" immer "Verbesserung" bedeutet, unabhängig von der Notenskala.
-  const yFor = (v) => {
-    const t = (v - min) / range;
-    const flipped = skala === "unterstufe" ? 1 - t : t;
-    return pad + (1 - flipped) * (height - 2 * pad);
-  };
-  const xFor = (i) => pad + (i / (points.length - 1)) * (width - 2 * pad);
-
-  const pathD = points.map((v, i) => `${i === 0 ? "M" : "L"} ${xFor(i).toFixed(1)} ${yFor(v).toFixed(1)}`).join(" ");
-  const lastX = xFor(points.length - 1), lastY = yFor(points[points.length - 1]);
-  const areaD = `${pathD} L ${lastX.toFixed(1)} ${height - pad} L ${xFor(0).toFixed(1)} ${height - pad} Z`;
-
-  const digits = skala === "oberstufe" ? 1 : 2;
-  const unit = skala === "oberstufe" ? " NP" : "";
-  const current = points[points.length - 1].toFixed(digits);
-  const first = points[0].toFixed(digits);
-  const improving = skala === "unterstufe" ? points[points.length - 1] < points[0] : points[points.length - 1] > points[0];
-
-  container.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" style="width:100%; height:96px; display:block;">
-      <defs>
-        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" style="stop-color:var(--accent); stop-opacity:0.25" />
-          <stop offset="100%" style="stop-color:var(--accent); stop-opacity:0" />
-        </linearGradient>
-      </defs>
-      <path d="${areaD}" style="fill:url(#trendFill)" />
-      <path d="${pathD}" style="fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round" />
-      <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="4" style="fill:var(--accent)" />
-    </svg>
-    <div style="display:flex; justify-content:space-between; margin-top:4px; font-size:12px; color:var(--text-muted);">
-      <span>Start: ${first}${unit}</span>
-      <span style="${improving ? "color:var(--success); font-weight:600;" : ""}">${improving ? "↑ " : ""}Aktuell: ${current}${unit}</span>
-    </div>`;
-}
-
 function renderNoten(grades) {
   const skala = state.settings.notenskala || "unterstufe";
   const unit = skala === "oberstufe" ? " NP" : "";
@@ -871,9 +725,8 @@ function renderNoten(grades) {
     totalWeighted += g.note * g.gewichtung;
     totalWeight += g.gewichtung;
   }
-  setValueAnimated("tile-schnitt", totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–");
-  setValueAnimated("tile-anzahl-noten", grades.length);
-  renderGradeTrend(grades);
+  document.getElementById("tile-schnitt").textContent = totalWeight ? (totalWeighted / totalWeight).toFixed(skala === "oberstufe" ? 1 : 2) + unit : "–";
+  document.getElementById("tile-anzahl-noten").textContent = grades.length;
 
   const bySubjectEl = document.getElementById("grades-by-subject");
   const subjects = Object.keys(bySubject).sort();
@@ -887,7 +740,7 @@ function renderNoten(grades) {
         const wSum = list.reduce((s, g) => s + g.gewichtung, 0);
         const schnitt = (w / wSum).toFixed(skala === "oberstufe" ? 1 : 2);
         return `<div class="card" style="margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
-          <div><div class="task-fach">${subjectDot(fach)}${escapeHtml(fach)}</div><div class="task-text">${list.length} Note${list.length !== 1 ? "n" : ""}</div></div>
+          <div><div class="task-fach">${escapeHtml(fach)}</div><div class="task-text">${list.length} Note${list.length !== 1 ? "n" : ""}</div></div>
           <div class="value mono" style="font-size:20px;">${schnitt}${unit}</div>
         </div>`;
       })
@@ -903,7 +756,7 @@ function renderNoten(grades) {
         (g) => `
         <div class="task-row" data-id="${g.id}">
           <div style="flex:1;">
-            <div class="task-fach">${subjectDot(g.fach)}${escapeHtml(g.fach)}${g.art ? " · " + escapeHtml(g.art) : ""}</div>
+            <div class="task-fach">${escapeHtml(g.fach)}${g.art ? " · " + escapeHtml(g.art) : ""}</div>
             <div class="task-text">${g.beschreibung ? escapeHtml(g.beschreibung) : fmtDate(g.datum)}</div>
             <div class="task-due later">Gewichtung ${g.gewichtung}x</div>
           </div>
@@ -923,444 +776,6 @@ function renderNoten(grades) {
     });
   }
 }
-
-// ==================== KI-Lernassistent ====================
-
-let tutorLevel = "";
-let tutorSending = false;
-
-const TUTOR_LEVEL_LABELS = {
-  hinweis: "💡 Hinweis",
-  schritt: "🧩 Nächster Schritt",
-  erklaerung: "📖 Erklärung",
-  loesung: "✅ Lösung",
-};
-
-function populateTutorFaecher() {
-  const faecher = new Set();
-  (state.tasks || []).forEach((t) => faecher.add(t.fach));
-  (state.grades || []).forEach((g) => faecher.add(g.fach));
-  const sorted = [...faecher].sort();
-
-  document.getElementById("fach-datalist").innerHTML = sorted
-    .map((f) => `<option value="${escapeHtml(f)}"></option>`)
-    .join("");
-}
-
-function renderTutorMessage(m) {
-  const levelLabel = m.role === "assistant" ? TUTOR_LEVEL_LABELS[m.level] : null;
-  return `<div class="tutor-msg ${m.role}${m.pending ? " pending" : ""}">
-    ${levelLabel ? `<span class="tutor-level-tag">${levelLabel}</span>` : ""}
-    ${escapeHtml(m.content)}
-  </div>`;
-}
-
-function renderTutorChat(messages) {
-  const box = document.getElementById("tutor-chat");
-  if (!messages || messages.length === 0) {
-    box.innerHTML = `<div class="empty-state"><div class="display">Frag mich etwas 👋</div>Ich helfe dir beim Verstehen, Üben und Wiederholen.</div>`;
-    return;
-  }
-  box.innerHTML = messages.map(renderTutorMessage).join("");
-  box.scrollTop = box.scrollHeight;
-}
-
-document.getElementById("tutor-level-segmented").addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  haptic("selection");
-  const wasActive = btn.classList.contains("active");
-  document.querySelectorAll("#tutor-level-segmented button").forEach((b) => b.classList.remove("active"));
-  tutorLevel = wasActive ? "" : btn.dataset.level;
-  if (tutorLevel) btn.classList.add("active");
-});
-
-async function sendTutorMessage(text) {
-  const trimmed = (text || "").trim();
-  if (!trimmed || tutorSending) return;
-  tutorSending = true;
-
-  const fach = document.getElementById("tutor-fach").value.trim();
-  state.tutorHistory = [
-    ...(state.tutorHistory || []),
-    { role: "user", content: trimmed, level: tutorLevel, fach },
-    { role: "assistant", content: "…", pending: true },
-  ];
-  renderTutorChat(state.tutorHistory);
-
-  const result = await api("/api/tutor/chat", {
-    method: "POST",
-    body: JSON.stringify({ message: trimmed, level: tutorLevel, fach }),
-  });
-
-  state.tutorHistory = state.tutorHistory.filter((m) => !m.pending);
-  state.tutorHistory.push(
-    result.ok
-      ? { role: "assistant", content: result.reply, level: tutorLevel, fach }
-      : { role: "assistant", content: result.error || "Da ist etwas schiefgelaufen.", level: "" }
-  );
-  renderTutorChat(state.tutorHistory);
-  tutorSending = false;
-}
-
-document.getElementById("tutor-send").addEventListener("click", () => {
-  const input = document.getElementById("tutor-input");
-  sendTutorMessage(input.value);
-  input.value = "";
-});
-
-document.getElementById("tutor-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    document.getElementById("tutor-send").click();
-  }
-});
-
-document.getElementById("tutor-suggestions").addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  sendTutorMessage(btn.dataset.text);
-});
-
-document.getElementById("tutor-clear-btn").addEventListener("click", async () => {
-  if (!confirm("Chatverlauf mit dem KI-Tutor wirklich löschen?")) return;
-  await api("/api/tutor/history", { method: "DELETE" });
-  state.tutorHistory = [];
-  renderTutorChat([]);
-});
-
-// ==================== Karteikarten ====================
-
-document.getElementById("tutor-subnav").addEventListener("click", (e) => {
-  const btn = e.target.closest("button[data-tutor-tab]");
-  if (!btn) return;
-  haptic("selection");
-  document.querySelectorAll("#tutor-subnav button").forEach((b) => b.classList.remove("active"));
-  btn.classList.add("active");
-  const isChat = btn.dataset.tutorTab === "chat";
-  document.getElementById("tutor-chat-ui").style.display = isChat ? "block" : "none";
-  document.getElementById("tutor-flashcards-ui").style.display = isChat ? "none" : "block";
-  if (!isChat) loadFlashcardSets();
-});
-
-async function loadFlashcardSets() {
-  const sets = await api("/api/flashcards/sets");
-  const el = document.getElementById("flashcard-sets-list");
-  if (!sets.length) {
-    el.innerHTML = `<div class="empty-state">Noch keine Karteikarten erstellt.</div>`;
-    return;
-  }
-  el.innerHTML = sets
-    .map(
-      (s, i) => `
-      <div class="card stagger-in" style="--i:${i}; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;" data-set-id="${s.id}">
-        <div style="flex:1; cursor:pointer;" data-action="open-set">
-          <div class="task-fach">${subjectDot(s.fach)}${escapeHtml(s.fach)}</div>
-          <div class="task-text">${escapeHtml(s.thema)}</div>
-          <div class="task-due later">${s.anzahl} Karte${s.anzahl !== 1 ? "n" : ""}</div>
-        </div>
-        <button class="icon-btn" data-action="delete-set" style="width:32px;height:32px;">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
-      </div>`
-    )
-    .join("");
-
-  el.querySelectorAll('[data-action="open-set"]').forEach((row) => {
-    row.addEventListener("click", () => openFlashcardStudy(row.closest("[data-set-id]").dataset.setId));
-  });
-  el.querySelectorAll('[data-action="delete-set"]').forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      haptic("medium");
-      const setId = btn.closest("[data-set-id]").dataset.setId;
-      await api(`/api/flashcards/sets/${setId}`, { method: "DELETE" });
-      loadFlashcardSets();
-    });
-  });
-}
-
-document.getElementById("flashcard-generate-btn").addEventListener("click", async () => {
-  const fach = document.getElementById("flashcard-fach").value.trim();
-  const thema = document.getElementById("flashcard-thema").value.trim();
-  if (!fach || !thema) {
-    alert("Bitte Fach und Thema angeben.");
-    return;
-  }
-  const btn = document.getElementById("flashcard-generate-btn");
-  btn.disabled = true;
-  btn.textContent = "Erstelle Karten …";
-  haptic("medium");
-
-  const result = await api("/api/flashcards/generate", { method: "POST", body: JSON.stringify({ fach, thema }) });
-
-  btn.disabled = false;
-  btn.textContent = "Karteikarten erstellen";
-
-  if (result.ok) {
-    haptic("success");
-    document.getElementById("flashcard-thema").value = "";
-    await loadFlashcardSets();
-    openFlashcardStudy(result.set_id);
-  } else {
-    haptic("warning");
-    alert(result.error || "Karteikarten konnten nicht erstellt werden.");
-  }
-});
-
-let currentFlashcards = [];
-let currentFlashcardIndex = 0;
-let currentFlashcardShowingAnswer = false;
-
-async function openFlashcardStudy(setId) {
-  const cards = await api(`/api/flashcards/sets/${setId}`);
-  if (!Array.isArray(cards) || !cards.length) return;
-  currentFlashcards = cards;
-  currentFlashcardIndex = 0;
-  currentFlashcardShowingAnswer = false;
-  renderFlashcardStudy();
-  document.getElementById("flashcard-study-backdrop").classList.add("open");
-  document.getElementById("flashcard-study-sheet").classList.add("open");
-}
-
-function renderFlashcardStudy() {
-  const card = currentFlashcards[currentFlashcardIndex];
-  document.getElementById("flashcard-progress").textContent = `${currentFlashcardIndex + 1} / ${currentFlashcards.length}`;
-  const textEl = document.getElementById("flashcard-flip-text");
-  textEl.classList.add("updating");
-  setTimeout(() => {
-    textEl.textContent = currentFlashcardShowingAnswer ? card.antwort : card.frage;
-    textEl.classList.remove("updating");
-  }, 120);
-  document.getElementById("flashcard-flip-btn").textContent = currentFlashcardShowingAnswer ? "Frage zeigen" : "Antwort zeigen";
-}
-
-document.getElementById("flashcard-flip-btn").addEventListener("click", () => {
-  haptic("selection");
-  currentFlashcardShowingAnswer = !currentFlashcardShowingAnswer;
-  renderFlashcardStudy();
-});
-document.getElementById("flashcard-prev-btn").addEventListener("click", () => {
-  if (currentFlashcardIndex === 0) return;
-  haptic("light");
-  currentFlashcardIndex -= 1;
-  currentFlashcardShowingAnswer = false;
-  renderFlashcardStudy();
-});
-document.getElementById("flashcard-next-btn").addEventListener("click", () => {
-  if (currentFlashcardIndex >= currentFlashcards.length - 1) return;
-  haptic("light");
-  currentFlashcardIndex += 1;
-  currentFlashcardShowingAnswer = false;
-  renderFlashcardStudy();
-});
-function closeFlashcardStudy() {
-  document.getElementById("flashcard-study-backdrop").classList.remove("open");
-  document.getElementById("flashcard-study-sheet").classList.remove("open");
-}
-document.getElementById("flashcard-study-close").addEventListener("click", closeFlashcardStudy);
-document.getElementById("flashcard-study-backdrop").addEventListener("click", closeFlashcardStudy);
-
-// ==================== Globale Suche ====================
-
-document.getElementById("search-btn").addEventListener("click", () => {
-  haptic("light");
-  document.getElementById("search-backdrop").classList.add("open");
-  document.getElementById("search-sheet").classList.add("open");
-  const input = document.getElementById("search-input");
-  input.value = "";
-  document.getElementById("search-results").innerHTML = "";
-  setTimeout(() => input.focus(), 300);
-});
-
-function closeSearch() {
-  document.getElementById("search-backdrop").classList.remove("open");
-  document.getElementById("search-sheet").classList.remove("open");
-}
-document.getElementById("search-backdrop").addEventListener("click", closeSearch);
-
-document.getElementById("search-input").addEventListener("input", (e) => {
-  runSearch(e.target.value.trim().toLowerCase());
-});
-
-function runSearch(q) {
-  const resultsEl = document.getElementById("search-results");
-  if (!q) {
-    resultsEl.innerHTML = "";
-    return;
-  }
-
-  const taskResults = (state.tasks || []).filter(
-    (t) => t.fach.toLowerCase().includes(q) || t.text.toLowerCase().includes(q)
-  );
-  const gradeResults = (state.grades || []).filter(
-    (g) =>
-      g.fach.toLowerCase().includes(q) ||
-      (g.beschreibung || "").toLowerCase().includes(q) ||
-      (g.art || "").toLowerCase().includes(q)
-  );
-  const planResults = (state.timetable || [])
-    .filter(
-      (p) =>
-        p.subject.toLowerCase().includes(q) ||
-        (p.teacher || "").toLowerCase().includes(q) ||
-        (p.room || "").toLowerCase().includes(q)
-    )
-    .slice(0, 8);
-
-  if (!taskResults.length && !gradeResults.length && !planResults.length) {
-    resultsEl.innerHTML = `<div class="empty-state">Nichts gefunden.</div>`;
-    return;
-  }
-
-  let html = "";
-  if (taskResults.length) {
-    html += `<div class="section-title">Aufgaben</div>`;
-    html += taskResults
-      .map(
-        (t) => `
-      <div class="task-row" data-goto="aufgaben" data-id="${t.id}" style="cursor:pointer;">
-        <div style="flex:1;">
-          <div class="task-fach">${subjectDot(t.fach)}${escapeHtml(t.fach)}</div>
-          <div class="task-text">${escapeHtml(t.text)}</div>
-        </div>
-      </div>`
-      )
-      .join("");
-  }
-  if (gradeResults.length) {
-    html += `<div class="section-title">Noten</div>`;
-    html += gradeResults
-      .map(
-        (g) => `
-      <div class="task-row" data-goto="noten" data-id="${g.id}" style="cursor:pointer;">
-        <div style="flex:1;">
-          <div class="task-fach">${subjectDot(g.fach)}${escapeHtml(g.fach)}</div>
-          <div class="task-text">${escapeHtml(g.beschreibung || g.art || "Note")}</div>
-        </div>
-        <div class="value mono" style="font-size:18px;">${g.note}</div>
-      </div>`
-      )
-      .join("");
-  }
-  if (planResults.length) {
-    html += `<div class="section-title">Stundenplan</div>`;
-    html += planResults
-      .map(
-        (p) => `
-      <div class="task-row" data-goto="plan" style="cursor:pointer;">
-        <div style="flex:1;">
-          <div class="task-fach">${subjectDot(p.subject)}${escapeHtml(p.subject)}</div>
-          <div class="task-text">${escapeHtml(p.teacher || "")} · Raum ${escapeHtml(p.room || "–")}</div>
-        </div>
-        <div class="task-due later mono">${fmtDate(p.date)}</div>
-      </div>`
-      )
-      .join("");
-  }
-
-  resultsEl.innerHTML = html;
-  resultsEl.querySelectorAll("[data-goto]").forEach((row) => {
-    row.addEventListener("click", () => {
-      haptic("selection");
-      const target = row.dataset.goto;
-      const containerSel = target === "aufgaben" ? "#sub-aufgaben" : target === "noten" ? "#sub-noten" : null;
-      closeSearch();
-      document.querySelector('.tab[data-screen="schule"]').click();
-      document.querySelector(`#schule-subnav button[data-sub="${target}"]`).click();
-      if (row.dataset.id && containerSel) {
-        setTimeout(() => {
-          const el = document.querySelector(`${containerSel} [data-id="${row.dataset.id}"]`);
-          if (!el) return;
-          el.scrollIntoView({ behavior: "smooth", block: "center" });
-          el.style.transition = "background 0.4s ease";
-          el.style.background = "var(--accent-soft)";
-          setTimeout(() => { el.style.background = ""; }, 1300);
-        }, 350);
-      }
-    });
-  });
-}
-
-// ==================== Globale Suche Ende ====================
-
-// ==================== App-Installation (PWA) ====================
-
-let deferredInstallPrompt = null;
-const isStandaloneApp = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
-const isIOSDevice = /iphone|ipad|ipod/i.test(navigator.userAgent);
-
-function canOfferInstall() {
-  if (isStandaloneApp) return false;
-  return !!deferredInstallPrompt || isIOSDevice;
-}
-
-function updateInstallUI() {
-  const show = canOfferInstall();
-  const settingsCard = document.getElementById("install-card");
-  if (settingsCard) settingsCard.style.display = show ? "block" : "none";
-
-  const banner = document.getElementById("install-banner");
-  if (banner) {
-    const dismissed = localStorage.getItem("installBannerDismissed") === "1";
-    banner.style.display = show && !dismissed ? "flex" : "none";
-  }
-}
-
-async function triggerInstall() {
-  if (deferredInstallPrompt) {
-    deferredInstallPrompt.prompt();
-    await deferredInstallPrompt.userChoice;
-    deferredInstallPrompt = null;
-    updateInstallUI();
-  } else if (isIOSDevice) {
-    document.getElementById("ios-install-sheet-backdrop").classList.add("open");
-    document.getElementById("ios-install-sheet").classList.add("open");
-  }
-}
-
-window.addEventListener("beforeinstallprompt", (e) => {
-  e.preventDefault();
-  deferredInstallPrompt = e;
-  updateInstallUI();
-});
-
-window.addEventListener("appinstalled", () => {
-  deferredInstallPrompt = null;
-  updateInstallUI();
-});
-
-document.getElementById("install-btn-banner").addEventListener("click", triggerInstall);
-document.getElementById("install-btn-settings").addEventListener("click", triggerInstall);
-
-document.getElementById("install-banner-dismiss").addEventListener("click", () => {
-  localStorage.setItem("installBannerDismissed", "1");
-  document.getElementById("install-banner").style.display = "none";
-});
-
-document.getElementById("ios-install-sheet-close").addEventListener("click", () => {
-  document.getElementById("ios-install-sheet-backdrop").classList.remove("open");
-  document.getElementById("ios-install-sheet").classList.remove("open");
-});
-document.getElementById("ios-install-sheet-backdrop").addEventListener("click", () => {
-  document.getElementById("ios-install-sheet-backdrop").classList.remove("open");
-  document.getElementById("ios-install-sheet").classList.remove("open");
-});
-
-updateInstallUI();
-
-// ==================== Sticky Topbar (Blur beim Scrollen) ====================
-
-let topbarScrolled = false;
-window.addEventListener(
-  "scroll",
-  () => {
-    const shouldBeScrolled = window.scrollY > 4;
-    if (shouldBeScrolled === topbarScrolled) return; // nur bei echtem Zustandswechsel neu rendern
-    topbarScrolled = shouldBeScrolled;
-    document.querySelector(".topbar").classList.toggle("scrolled", topbarScrolled);
-  },
-  { passive: true }
-);
 
 // ==================== Start ====================
 
