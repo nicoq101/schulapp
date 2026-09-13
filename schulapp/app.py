@@ -305,73 +305,191 @@ def _normalize_klasse_name(value):
 
 
 def _periods_to_result(table):
+    """Wandelt WebUntis-Perioden robust in das Frontend-Format um."""
     result = []
     for p in table:
+        subjects = getattr(p, "subjects", []) or []
+        rooms = getattr(p, "rooms", []) or []
+        teachers = getattr(p, "teachers", []) or []
+        info = (
+            getattr(p, "lstext", None)
+            or getattr(p, "info", None)
+            or getattr(p, "text", None)
+            or ""
+        )
         result.append({
             "date": p.start.date().isoformat(),
             "start": p.start.strftime("%H:%M"),
             "end": p.end.strftime("%H:%M"),
-            "subject": ", ".join(getattr(s, "name", str(s)) for s in p.subjects) or "?",
-            "room": ", ".join(getattr(r, "name", str(r)) for r in p.rooms) or "?",
+            "subject": ", ".join(getattr(s, "name", str(s)) for s in subjects) or "?",
+            "room": ", ".join(getattr(r, "name", str(r)) for r in rooms) or "?",
             "teacher": ", ".join(
-                getattr(t, "surname", None) or getattr(t, "name", str(t))
-                for t in p.teachers
+                getattr(t, "surname", None)
+                or getattr(t, "name", None)
+                or getattr(t, "long_name", None)
+                or str(t)
+                for t in teachers
             ) or "?",
-            "code": p.code or "",
-            "info": p.text or "",
+            "code": getattr(p, "code", None) or "",
+            "info": str(info),
         })
     return result
 
 
-def _fetch_klasse_timetable(session_, user, start, end):
-    """Fallback, falls my_timetable() bei einem Schülerkonto leer bleibt."""
-    errors = []
+def _safe_attempt(attempts, name, fn):
+    """Führt eine Stundenplan-Strategie aus und protokolliert das Ergebnis."""
+    try:
+        table = fn()
+        count = len(table)
+        attempts.append({"source": name, "count": count, "ok": True})
+        if count:
+            return table, name
+    except Exception as e:
+        attempts.append({
+            "source": name,
+            "count": 0,
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        })
+    return None, None
 
-    # WebUntis liefert beim Login normalerweise direkt die Klasse des Schülers.
-    klasse_id = (getattr(session_, "login_result", {}) or {}).get("klasseId")
-    if klasse_id:
-        try:
-            table = session_.timetable_extended(
-                klasse=int(klasse_id), start=start, end=end
-            )
-            if len(table):
-                return table, f"Klasse (ID {klasse_id})", errors
-        except Exception as e:
-            errors.append(f"Klassenplan über klasseId {klasse_id}: {e}")
 
-    # Falls nötig: die in der Schulapp eingetragene Klasse suchen.
+def _find_configured_klasse(session_, user, attempts):
     klasse_name = (get_setting(user["id"], "klasse", "") or "").strip()
-    if klasse_name:
-        try:
-            wanted = _normalize_klasse_name(klasse_name)
-            klassen = session_.klassen()
-            match = None
-            for k in klassen:
-                names = [
-                    getattr(k, "name", ""),
-                    getattr(k, "long_name", ""),
-                    getattr(k, "longName", ""),
-                ]
-                if any(_normalize_klasse_name(n) == wanted for n in names if n):
-                    match = k
-                    break
+    if not klasse_name:
+        return None
 
-            if match is not None:
-                table = session_.timetable_extended(
-                    klasse=match, start=start, end=end
-                )
-                if len(table):
-                    return table, f"Klasse {getattr(match, 'name', klasse_name)}", errors
-            else:
-                errors.append(f"Klasse '{klasse_name}' wurde bei WebUntis nicht gefunden.")
-        except Exception as e:
-            errors.append(f"Klassenplan über Klassenname '{klasse_name}': {e}")
+    try:
+        klassen = session_.klassen()
+    except Exception as e:
+        attempts.append({
+            "source": "Klassenliste",
+            "count": 0,
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        })
+        return None
 
-    return [], None, errors
+    wanted = _normalize_klasse_name(klasse_name)
+    candidates = []
+    for k in klassen:
+        names = [
+            getattr(k, "name", ""),
+            getattr(k, "long_name", ""),
+            getattr(k, "longName", ""),
+        ]
+        normalized = [_normalize_klasse_name(n) for n in names if n]
+        if wanted in normalized:
+            return k
+        if any(wanted and (wanted in n or n in wanted) for n in normalized):
+            candidates.append(k)
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    attempts.append({
+        "source": f"Klasse '{klasse_name}' suchen",
+        "count": 0,
+        "ok": False,
+        "error": "Klasse nicht eindeutig gefunden.",
+    })
+    return None
+
+
+def _fetch_timetable_auto(session_, user, start, end):
+    """Probiert mehrere WebUntis-Wege, statt Fehler als leeren Plan zu verschlucken.
+
+    Hintergrund: python-webuntis benutzt bei my_timetable() personType direkt aus
+    dem Login. Manche WebUntis-Konten liefern dort inzwischen Werte wie 12, obwohl
+    getTimetable nur die Elementtypen 1..5 akzeptiert. Dann funktioniert der Login,
+    aber my_timetable() nicht. Deshalb versuchen wir explizit STUDENT (Typ 5) und
+    danach die Klasse.
+    """
+    attempts = []
+    login_result = getattr(session_, "login_result", {}) or {}
+    person_id = login_result.get("personId")
+    person_type = login_result.get("personType")
+    klasse_id = login_result.get("klasseId")
+
+    # 1) Standardweg der Bibliothek.
+    table, source = _safe_attempt(
+        attempts,
+        "my_timetable",
+        lambda: session_.my_timetable(start=start, end=end),
+    )
+    if table is not None:
+        return table, source, attempts
+
+    # 2) WICHTIGER FIX: Person explizit als Schüler (Elementtyp 5) abfragen.
+    # Das umgeht ungültige personType-Werte wie 12.
+    if person_id:
+        table, source = _safe_attempt(
+            attempts,
+            f"Schüler-ID {person_id} (extended)",
+            lambda: session_.timetable_extended(student=int(person_id), start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+        table, source = _safe_attempt(
+            attempts,
+            f"Schüler-ID {person_id} (basic)",
+            lambda: session_.timetable(student=int(person_id), start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+    # 3) Falls der Login eine Klasse liefert, diese direkt verwenden.
+    if klasse_id not in (None, "", 0, "0"):
+        table, source = _safe_attempt(
+            attempts,
+            f"Klassen-ID {klasse_id} (extended)",
+            lambda: session_.timetable_extended(klasse=int(klasse_id), start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+        table, source = _safe_attempt(
+            attempts,
+            f"Klassen-ID {klasse_id} (basic)",
+            lambda: session_.timetable(klasse=int(klasse_id), start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+    # 4) Manuell in der Schulapp eingetragene Klasse.
+    klasse = _find_configured_klasse(session_, user, attempts)
+    if klasse is not None:
+        table, source = _safe_attempt(
+            attempts,
+            f"eingetragene Klasse {getattr(klasse, 'name', '')} (extended)",
+            lambda: session_.timetable_extended(klasse=klasse, start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+        table, source = _safe_attempt(
+            attempts,
+            f"eingetragene Klasse {getattr(klasse, 'name', '')} (basic)",
+            lambda: session_.timetable(klasse=klasse, start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+    # 5) Wenn es offensichtlich ein Lehrer-Konto ist, auch Lehrer explizit testen.
+    if person_id and person_type == 2:
+        table, source = _safe_attempt(
+            attempts,
+            f"Lehrer-ID {person_id}",
+            lambda: session_.timetable_extended(teacher=int(person_id), start=start, end=end),
+        )
+        if table is not None:
+            return table, source, attempts
+
+    return [], None, attempts
 
 
 def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
-    """Holt zuerst den persönlichen Plan und fällt bei leerem Ergebnis auf den Klassenplan zurück."""
     if not user.get("untis_username"):
         return []
 
@@ -386,26 +504,13 @@ def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
         print(f"WebUntis-Login fehlgeschlagen ({user['username']}): {e}")
         return []
 
-    errors = []
     try:
-        try:
-            table = session_.my_timetable(start=start, end=end)
-            if len(table):
-                print(f"WebUntis ({user['username']}): {len(table)} Einträge über my_timetable")
-                return _periods_to_result(table)
-        except webuntis.errors.DateNotAllowed:
-            return []
-        except Exception as e:
-            errors.append(f"my_timetable: {e}")
-
-        # Manche Schülerkonten liefern über my_timetable() leer, obwohl die
-        # offizielle WebUntis-App Stunden zeigt. Dann nutzen wir die klasseId.
-        table, source, fallback_errors = _fetch_klasse_timetable(
-            session_, user, start, end
-        )
-        errors.extend(fallback_errors)
-        if len(table):
-            print(f"WebUntis ({user['username']}): {len(table)} Einträge über {source}")
+        table, source, attempts = _fetch_timetable_auto(session_, user, start, end)
+        if table:
+            print(
+                f"WebUntis ({user['username']}): {len(table)} Einträge über {source}; "
+                f"Zeitraum {start}..{end}"
+            )
             return _periods_to_result(table)
 
         login_result = getattr(session_, "login_result", {}) or {}
@@ -415,8 +520,8 @@ def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
             "klasseId": login_result.get("klasseId"),
         }
         print(
-            f"WebUntis liefert keinen Stundenplan ({user['username']}). "
-            f"Login-Info={safe_info}; Fehler={errors}"
+            f"WebUntis liefert keinen Stundenplan ({user['username']}) für {start}..{end}. "
+            f"Login-Info={safe_info}; Versuche={attempts}"
         )
         return []
     finally:
@@ -1086,18 +1191,19 @@ def api_untis():
 @app.route("/api/untis/test", methods=["POST"])
 @login_required
 def api_untis_test():
-    """Testet Login UND ob WebUntis tatsächlich Stunden liefert."""
+    """Diagnose: Login + mehrere Stundenplan-Strategien, ohne Passwort auszugeben."""
     user = current_user()
     if not user.get("untis_username"):
         return jsonify({"ok": False, "error": "Noch kein WebUntis-Konto verbunden."}), 400
 
-    today = dt.date.today()
-    end = today + dt.timedelta(days=7)
+    # Ab heute 14 Tage testen, damit Wochenende/Ferien weniger leicht als Fehler wirken.
+    start = dt.date.today()
+    end = start + dt.timedelta(days=14)
 
     try:
         s = untis_login(user)
     except Exception as e:
-        return jsonify({"ok": False, "error": f"Login fehlgeschlagen: {e}"}), 400
+        return jsonify({"ok": False, "login_ok": False, "error": f"Login fehlgeschlagen: {e}"}), 400
 
     try:
         login_result = getattr(s, "login_result", {}) or {}
@@ -1106,49 +1212,30 @@ def api_untis_test():
             "personId": login_result.get("personId"),
             "klasseId": login_result.get("klasseId"),
         }
+        table, source, attempts = _fetch_timetable_auto(s, user, start, end)
 
-        personal_count = 0
-        personal_error = None
-        try:
-            personal = s.my_timetable(start=today, end=end)
-            personal_count = len(personal)
-        except Exception as e:
-            personal_error = str(e)
-
-        class_count = 0
-        class_source = None
-        class_errors = []
-        if personal_count == 0:
-            class_table, class_source, class_errors = _fetch_klasse_timetable(
-                s, user, today, end
-            )
-            class_count = len(class_table)
-
-        total = personal_count or class_count
-        if total:
+        if table:
             return jsonify({
                 "ok": True,
+                "login_ok": True,
                 "timetable_ok": True,
-                "count": total,
-                "source": "persönlicher Stundenplan" if personal_count else class_source,
+                "count": len(table),
+                "source": source,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
                 "login": info,
+                "attempts": attempts,
             })
-
-        details = []
-        if personal_error:
-            details.append(f"Persönlicher Plan: {personal_error}")
-        details.extend(class_errors)
 
         return jsonify({
             "ok": False,
             "login_ok": True,
             "timetable_ok": False,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
             "login": info,
-            "error": (
-                "Der WebUntis-Login funktioniert, aber für die nächsten 7 Tage "
-                "wurden keine Stunden geliefert."
-                + (f" Details: {' | '.join(details)}" if details else "")
-            ),
+            "attempts": attempts,
+            "error": "Login funktioniert, aber keine der Stundenplan-Strategien liefert Stunden.",
         }), 400
     finally:
         try:
