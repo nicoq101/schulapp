@@ -514,7 +514,7 @@ document.getElementById("test-untis-btn").addEventListener("click", async () => 
   const status = document.getElementById("untis-status");
   const btn = document.getElementById("test-untis-btn");
   btn.disabled = true;
-  status.textContent = "Prüfe Login + persönlichen Plan + Schüler-ID + Klasse …";
+  status.textContent = "Prüfe Login + Schülerplan + Schuljahresgrenzen …";
   const result = await api("/api/untis/test", { method: "POST" });
 
   const login = result.login || {};
@@ -527,7 +527,10 @@ document.getElementById("test-untis-btn").addEventListener("click", async () => 
   }).join("\n");
 
   if (result.ok) {
-    status.textContent = `✅ ${result.count} Stunden gefunden über ${result.source}. ${loginInfo}`;
+    const segments = (result.schoolyear_segments || [])
+      .map((s) => `${s.start}–${s.end} (${s.schoolyear})`)
+      .join(", ");
+    status.textContent = `✅ ${result.count} Stunden gefunden über ${result.source}. ${loginInfo}${segments ? `\nSchuljahre: ${segments}` : ""}`;
     state.weekTimetable = [];
     await loadAll();
     if (planMode === "woche") await loadWeekTimetable();
