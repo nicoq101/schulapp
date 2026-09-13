@@ -307,37 +307,142 @@ def _normalize_klasse_name(value):
     return "".join(ch for ch in (value or "").lower() if ch.isalnum())
 
 
+def _raw_period_names(period, raw_key):
+    """Liest Namen direkt aus dem getTimetable-Rohobjekt, ohne extra Stammdaten-Rechte."""
+    raw = getattr(period, "_data", {}) or {}
+    items = raw.get(raw_key, []) or []
+    names = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = (
+            item.get("name")
+            or item.get("longName")
+            or item.get("foreName")
+            or item.get("displayName")
+        )
+        if value:
+            names.append(str(value))
+    return names
+
+
+def _period_related_names(period, raw_key, attr, teacher=False):
+    # Neuere WebUntis-Antworten enthalten die Namen teilweise direkt im
+    # Stundenplan. Das ist besser, weil Schülerkonten häufig keine Rechte für
+    # getTeachers/getSubjects/getRooms besitzen.
+    names = _raw_period_names(period, raw_key)
+    if names:
+        return names
+    try:
+        related = getattr(period, attr, []) or []
+    except Exception:
+        return []
+    result = []
+    for obj in related:
+        if teacher:
+            value = (
+                getattr(obj, "surname", None)
+                or getattr(obj, "long_name", None)
+                or getattr(obj, "name", None)
+            )
+        else:
+            value = getattr(obj, "name", None) or getattr(obj, "long_name", None)
+        if value:
+            result.append(str(value))
+    return result
+
+
 def _periods_to_result(table):
     """Wandelt WebUntis-Perioden robust in das Frontend-Format um."""
     result = []
     for p in table:
-        subjects = getattr(p, "subjects", []) or []
-        rooms = getattr(p, "rooms", []) or []
-        teachers = getattr(p, "teachers", []) or []
+        subjects = _period_related_names(p, "su", "subjects")
+        rooms = _period_related_names(p, "ro", "rooms")
+        teachers = _period_related_names(p, "te", "teachers", teacher=True)
+        raw = getattr(p, "_data", {}) or {}
         info = (
-            getattr(p, "lstext", None)
-            or getattr(p, "info", None)
-            or getattr(p, "text", None)
+            raw.get("lstext")
+            or raw.get("info")
+            or raw.get("substText")
+            or raw.get("bkText")
             or ""
         )
+        try:
+            code = getattr(p, "code", None) or ""
+        except Exception:
+            code = raw.get("code") or ""
         result.append({
             "date": p.start.date().isoformat(),
             "start": p.start.strftime("%H:%M"),
             "end": p.end.strftime("%H:%M"),
-            "subject": ", ".join(getattr(s, "name", str(s)) for s in subjects) or "?",
-            "room": ", ".join(getattr(r, "name", str(r)) for r in rooms) or "?",
-            "teacher": ", ".join(
-                getattr(t, "surname", None)
-                or getattr(t, "name", None)
-                or getattr(t, "long_name", None)
-                or str(t)
-                for t in teachers
-            ) or "?",
-            "code": getattr(p, "code", None) or "",
+            "subject": ", ".join(subjects) or "?",
+            "room": ", ".join(rooms) or "?",
+            "teacher": ", ".join(teachers) or "?",
+            "code": code,
             "info": str(info),
         })
     return result
 
+
+def _as_date(value):
+    if isinstance(value, dt.datetime):
+        return value.date()
+    return value
+
+
+def _split_range_by_schoolyear(session_, start, end):
+    """Teilt einen Zeitraum so, dass kein WebUntis-Aufruf zwei Schuljahre kreuzt.
+
+    WebUntis lehnt genau solche Anfragen mit DateNotAllowed ab. Falls die
+    Schuljahresliste aus irgendeinem Grund nicht verfügbar ist, wird als sichere
+    Notlösung tageweise abgefragt.
+    """
+    start = _as_date(start)
+    end = _as_date(end)
+    try:
+        years = session_.schoolyears()
+        segments = []
+        for year in years:
+            ys = _as_date(year.start)
+            ye = _as_date(year.end)
+            seg_start = max(start, ys)
+            seg_end = min(end, ye)
+            if seg_start <= seg_end:
+                segments.append({
+                    "start": seg_start,
+                    "end": seg_end,
+                    "schoolyear": getattr(year, "name", "") or f"ID {int(year)}",
+                    "schoolyear_id": int(year),
+                })
+        segments.sort(key=lambda s: s["start"])
+
+        # Daten, die in keinem gemeldeten Schuljahr liegen, trotzdem tageweise
+        # probieren. Das macht die Funktion auch bei ungewöhnlicher Schulkonfiguration robust.
+        covered = set()
+        for seg in segments:
+            d = seg["start"]
+            while d <= seg["end"]:
+                covered.add(d)
+                d += dt.timedelta(days=1)
+        d = start
+        while d <= end:
+            if d not in covered:
+                segments.append({"start": d, "end": d, "schoolyear": "unbekannt", "schoolyear_id": None})
+            d += dt.timedelta(days=1)
+        segments.sort(key=lambda s: s["start"])
+        if segments:
+            return segments, None
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    else:
+        error = "WebUntis hat keine passenden Schuljahre geliefert."
+
+    segments = []
+    d = start
+    while d <= end:
+        segments.append({"start": d, "end": d, "schoolyear": "tageweise", "schoolyear_id": None})
+        d += dt.timedelta(days=1)
+    return segments, error
 
 def _safe_attempt(attempts, name, fn):
     """Führt eine Stundenplan-Strategie aus und protokolliert das Ergebnis."""
@@ -639,6 +744,54 @@ def _fetch_timetable_auto(session_, user, start, end):
     return [], None, attempts
 
 
+def _fetch_timetable_across_schoolyears(session_, user, start, end):
+    """Holt einen Zeitraum in schuljahresreinen Teilstücken und führt ihn zusammen."""
+    segments, split_error = _split_range_by_schoolyear(session_, start, end)
+    combined = []
+    all_attempts = []
+    sources = []
+
+    if split_error:
+        all_attempts.append({
+            "source": "Schuljahre lesen",
+            "count": 0,
+            "ok": False,
+            "error": split_error + " – sichere tageweise Abfrage wird verwendet.",
+        })
+
+    for seg in segments:
+        seg_start = seg["start"]
+        seg_end = seg["end"]
+        label = seg["schoolyear"]
+        table, source, attempts = _fetch_timetable_auto(session_, user, seg_start, seg_end)
+        prefix = f"{seg_start.isoformat()}–{seg_end.isoformat()} [{label}]"
+        for attempt in attempts:
+            item = dict(attempt)
+            item["source"] = f"{prefix} → {item.get('source', '?')}"
+            all_attempts.append(item)
+        if table:
+            combined.extend(list(table))
+            if source:
+                sources.append(f"{source} ({label})")
+
+    # Doppelte Perioden vermeiden, falls ein Server Schuljahresgrenzen überlappend meldet.
+    unique = []
+    seen = set()
+    for p in combined:
+        raw = getattr(p, "_data", {}) or {}
+        key = (
+            raw.get("id"), raw.get("date"), raw.get("startTime"), raw.get("endTime"),
+            tuple(x.get("id") for x in (raw.get("su") or []) if isinstance(x, dict)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+
+    source_text = ", ".join(dict.fromkeys(sources)) if sources else None
+    return unique, source_text, all_attempts, segments
+
+
 def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
     if not user.get("untis_username"):
         return []
@@ -655,13 +808,20 @@ def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
         return []
 
     try:
-        table, source, attempts = _fetch_timetable_auto(session_, user, start, end)
+        table, source, attempts, segments = _fetch_timetable_across_schoolyears(
+            session_, user, start, end
+        )
         if table:
             print(
                 f"WebUntis ({user['username']}): {len(table)} Einträge über {source}; "
-                f"Zeitraum {start}..{end}"
+                f"Zeitraum {start}..{end}; Segmente="
+                f"{[(s['start'], s['end'], s['schoolyear']) for s in segments]}"
             )
-            return _periods_to_result(table)
+            try:
+                return _periods_to_result(table)
+            except Exception as e:
+                print(f"WebUntis-Perioden konnten nicht umgewandelt werden ({user['username']}): {e}")
+                return []
 
         login_result = getattr(session_, "login_result", {}) or {}
         safe_info = {
@@ -671,7 +831,7 @@ def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
         }
         print(
             f"WebUntis liefert keinen Stundenplan ({user['username']}) für {start}..{end}. "
-            f"Login-Info={safe_info}; Versuche={attempts}"
+            f"Login-Info={safe_info}; Segmente={segments}; Versuche={attempts}"
         )
         return []
     finally:
@@ -688,16 +848,32 @@ def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
 def fetch_exams(user, days_ahead=90):
     if not user.get("untis_username"):
         return []
+    start = dt.date.today()
+    end = start + dt.timedelta(days=days_ahead)
     try:
         session_ = untis_login(user)
-        exams = session_.exams(start=dt.date.today(), end=dt.date.today() + dt.timedelta(days=days_ahead))
-        session_.logout()
+        segments, _ = _split_range_by_schoolyear(session_, start, end)
+        exams = []
+        for seg in segments:
+            try:
+                exams.extend(list(session_.exams(start=seg["start"], end=seg["end"])))
+            except Exception as e:
+                print(
+                    f"Klausuren-Abruf Teilzeitraum {seg['start']}..{seg['end']} "
+                    f"fehlgeschlagen ({user['username']}): {e}"
+                )
+        session_.logout(suppress_errors=True)
     except Exception as e:
         print(f"Klausuren-Abruf fehlgeschlagen ({user['username']}): {e}")
         return []
 
     result = []
+    seen = set()
     for e in exams:
+        key = (getattr(e, "id", None), e.start)
+        if key in seen:
+            continue
+        seen.add(key)
         result.append({
             "name": getattr(e, "name", None) or getattr(e, "subject", "Klausur"),
             "date": e.start.date().isoformat(),
@@ -1362,12 +1538,11 @@ def api_untis():
 @app.route("/api/untis/test", methods=["POST"])
 @login_required
 def api_untis_test():
-    """Diagnose: Login + mehrere Stundenplan-Strategien, ohne Passwort auszugeben."""
+    """Diagnose: Login + Schülerplan, automatisch an Schuljahresgrenzen getrennt."""
     user = current_user()
     if not user.get("untis_username"):
         return jsonify({"ok": False, "error": "Noch kein WebUntis-Konto verbunden."}), 400
 
-    # Ab heute 14 Tage testen, damit Wochenende/Ferien weniger leicht als Fehler wirken.
     start = dt.date.today()
     end = start + dt.timedelta(days=14)
 
@@ -1383,7 +1558,18 @@ def api_untis_test():
             "personId": login_result.get("personId"),
             "klasseId": login_result.get("klasseId"),
         }
-        table, source, attempts = _fetch_timetable_auto(s, user, start, end)
+        table, source, attempts, segments = _fetch_timetable_across_schoolyears(
+            s, user, start, end
+        )
+        segment_json = [
+            {
+                "start": seg["start"].isoformat(),
+                "end": seg["end"].isoformat(),
+                "schoolyear": seg["schoolyear"],
+                "schoolyear_id": seg["schoolyear_id"],
+            }
+            for seg in segments
+        ]
 
         if table:
             return jsonify({
@@ -1396,6 +1582,7 @@ def api_untis_test():
                 "end": end.isoformat(),
                 "login": info,
                 "attempts": attempts,
+                "schoolyear_segments": segment_json,
             })
 
         return jsonify({
@@ -1406,7 +1593,8 @@ def api_untis_test():
             "end": end.isoformat(),
             "login": info,
             "attempts": attempts,
-            "error": "Login funktioniert, aber noch kein passender Schüler-Stundenplan wurde gefunden. Trage unten den exakten Vor- und Nachnamen des Schülers ein und teste erneut.",
+            "schoolyear_segments": segment_json,
+            "error": "Login funktioniert, aber WebUntis hat auch nach Trennung an den Schuljahresgrenzen keine Stunden geliefert.",
         }), 400
     finally:
         try:
