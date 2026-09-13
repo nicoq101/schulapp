@@ -299,16 +299,80 @@ def untis_login(user):
     ).login()
 
 
+def _normalize_klasse_name(value):
+    """Macht Klassenbezeichnungen vergleichbar, z.B. '10 B' == '10b'."""
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+def _periods_to_result(table):
+    result = []
+    for p in table:
+        result.append({
+            "date": p.start.date().isoformat(),
+            "start": p.start.strftime("%H:%M"),
+            "end": p.end.strftime("%H:%M"),
+            "subject": ", ".join(getattr(s, "name", str(s)) for s in p.subjects) or "?",
+            "room": ", ".join(getattr(r, "name", str(r)) for r in p.rooms) or "?",
+            "teacher": ", ".join(
+                getattr(t, "surname", None) or getattr(t, "name", str(t))
+                for t in p.teachers
+            ) or "?",
+            "code": p.code or "",
+            "info": p.text or "",
+        })
+    return result
+
+
+def _fetch_klasse_timetable(session_, user, start, end):
+    """Fallback, falls my_timetable() bei einem Schülerkonto leer bleibt."""
+    errors = []
+
+    # WebUntis liefert beim Login normalerweise direkt die Klasse des Schülers.
+    klasse_id = (getattr(session_, "login_result", {}) or {}).get("klasseId")
+    if klasse_id:
+        try:
+            table = session_.timetable_extended(
+                klasse=int(klasse_id), start=start, end=end
+            )
+            if len(table):
+                return table, f"Klasse (ID {klasse_id})", errors
+        except Exception as e:
+            errors.append(f"Klassenplan über klasseId {klasse_id}: {e}")
+
+    # Falls nötig: die in der Schulapp eingetragene Klasse suchen.
+    klasse_name = (get_setting(user["id"], "klasse", "") or "").strip()
+    if klasse_name:
+        try:
+            wanted = _normalize_klasse_name(klasse_name)
+            klassen = session_.klassen()
+            match = None
+            for k in klassen:
+                names = [
+                    getattr(k, "name", ""),
+                    getattr(k, "long_name", ""),
+                    getattr(k, "longName", ""),
+                ]
+                if any(_normalize_klasse_name(n) == wanted for n in names if n):
+                    match = k
+                    break
+
+            if match is not None:
+                table = session_.timetable_extended(
+                    klasse=match, start=start, end=end
+                )
+                if len(table):
+                    return table, f"Klasse {getattr(match, 'name', klasse_name)}", errors
+            else:
+                errors.append(f"Klasse '{klasse_name}' wurde bei WebUntis nicht gefunden.")
+        except Exception as e:
+            errors.append(f"Klassenplan über Klassenname '{klasse_name}': {e}")
+
+    return [], None, errors
+
+
 def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
-    """Holt den Stundenplan. Ohne start/end: die nächsten `days_ahead` Tage ab heute.
-    Mit start/end (date-Objekte): genau dieser Zeitraum - z.B. für die Wochenansicht,
-    die auch bereits vergangene Tage der aktuellen Woche zeigen soll."""
+    """Holt zuerst den persönlichen Plan und fällt bei leerem Ergebnis auf den Klassenplan zurück."""
     if not user.get("untis_username"):
-        return []
-    try:
-        session_ = untis_login(user)
-    except Exception as e:
-        print(f"WebUntis-Login fehlgeschlagen ({user['username']}): {e}")
         return []
 
     if start is None:
@@ -317,30 +381,54 @@ def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
         end = start + dt.timedelta(days=days_ahead)
 
     try:
-        table = session_.my_timetable(start=start, end=end)
-    except webuntis.errors.DateNotAllowed:
-        session_.logout()
-        return []
+        session_ = untis_login(user)
     except Exception as e:
-        print(f"Stundenplan-Abruf fehlgeschlagen ({user['username']}): {e}")
-        session_.logout()
+        print(f"WebUntis-Login fehlgeschlagen ({user['username']}): {e}")
         return []
 
-    result = []
-    for p in table:
-        result.append({
-            "date": p.start.date().isoformat(),
-            "start": p.start.strftime("%H:%M"),
-            "end": p.end.strftime("%H:%M"),
-            "subject": ", ".join(s.name for s in p.subjects) or "?",
-            "room": ", ".join(r.name for r in p.rooms) or "?",
-            "teacher": ", ".join(t.surname for t in p.teachers) or "?",
-            "code": p.code or "",
-            "info": p.text or "",
-        })
-    session_.logout()
-    return result
+    errors = []
+    try:
+        try:
+            table = session_.my_timetable(start=start, end=end)
+            if len(table):
+                print(f"WebUntis ({user['username']}): {len(table)} Einträge über my_timetable")
+                return _periods_to_result(table)
+        except webuntis.errors.DateNotAllowed:
+            return []
+        except Exception as e:
+            errors.append(f"my_timetable: {e}")
 
+        # Manche Schülerkonten liefern über my_timetable() leer, obwohl die
+        # offizielle WebUntis-App Stunden zeigt. Dann nutzen wir die klasseId.
+        table, source, fallback_errors = _fetch_klasse_timetable(
+            session_, user, start, end
+        )
+        errors.extend(fallback_errors)
+        if len(table):
+            print(f"WebUntis ({user['username']}): {len(table)} Einträge über {source}")
+            return _periods_to_result(table)
+
+        login_result = getattr(session_, "login_result", {}) or {}
+        safe_info = {
+            "personType": login_result.get("personType"),
+            "personId": login_result.get("personId"),
+            "klasseId": login_result.get("klasseId"),
+        }
+        print(
+            f"WebUntis liefert keinen Stundenplan ({user['username']}). "
+            f"Login-Info={safe_info}; Fehler={errors}"
+        )
+        return []
+    finally:
+        try:
+            session_.logout(suppress_errors=True)
+        except TypeError:
+            try:
+                session_.logout()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 def fetch_exams(user, days_ahead=90):
     if not user.get("untis_username"):
@@ -998,15 +1086,80 @@ def api_untis():
 @app.route("/api/untis/test", methods=["POST"])
 @login_required
 def api_untis_test():
+    """Testet Login UND ob WebUntis tatsächlich Stunden liefert."""
     user = current_user()
     if not user.get("untis_username"):
         return jsonify({"ok": False, "error": "Noch kein WebUntis-Konto verbunden."}), 400
+
+    today = dt.date.today()
+    end = today + dt.timedelta(days=7)
+
     try:
         s = untis_login(user)
-        s.logout()
-        return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": False, "error": f"Login fehlgeschlagen: {e}"}), 400
+
+    try:
+        login_result = getattr(s, "login_result", {}) or {}
+        info = {
+            "personType": login_result.get("personType"),
+            "personId": login_result.get("personId"),
+            "klasseId": login_result.get("klasseId"),
+        }
+
+        personal_count = 0
+        personal_error = None
+        try:
+            personal = s.my_timetable(start=today, end=end)
+            personal_count = len(personal)
+        except Exception as e:
+            personal_error = str(e)
+
+        class_count = 0
+        class_source = None
+        class_errors = []
+        if personal_count == 0:
+            class_table, class_source, class_errors = _fetch_klasse_timetable(
+                s, user, today, end
+            )
+            class_count = len(class_table)
+
+        total = personal_count or class_count
+        if total:
+            return jsonify({
+                "ok": True,
+                "timetable_ok": True,
+                "count": total,
+                "source": "persönlicher Stundenplan" if personal_count else class_source,
+                "login": info,
+            })
+
+        details = []
+        if personal_error:
+            details.append(f"Persönlicher Plan: {personal_error}")
+        details.extend(class_errors)
+
+        return jsonify({
+            "ok": False,
+            "login_ok": True,
+            "timetable_ok": False,
+            "login": info,
+            "error": (
+                "Der WebUntis-Login funktioniert, aber für die nächsten 7 Tage "
+                "wurden keine Stunden geliefert."
+                + (f" Details: {' | '.join(details)}" if details else "")
+            ),
+        }), 400
+    finally:
+        try:
+            s.logout(suppress_errors=True)
+        except TypeError:
+            try:
+                s.logout()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
 @app.route("/api/notifications")
 @login_required
