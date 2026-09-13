@@ -14,8 +14,6 @@ Einrichtung: siehe README.md im selben Ordner.
 
 import os
 import json
-import re
-import time
 import sqlite3
 import datetime as dt
 from pathlib import Path
@@ -24,15 +22,11 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, jsonify, request, send_from_directory, render_template, session
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.middleware.proxy_fix import ProxyFix
 from apscheduler.schedulers.background import BackgroundScheduler
 from pywebpush import webpush, WebPushException
 from cryptography.fernet import Fernet
 import pyotp
 import webuntis
-import requests
-import hmac
-import hashlib
 
 BASE_DIR = Path(__file__).parent
 DB_PATH = BASE_DIR / "schulapp.db"
@@ -43,7 +37,6 @@ TZ = ZoneInfo("Europe/Berlin")
 UNTIS_SCHOOL = os.environ.get("UNTIS_SCHOOL", "csgb")
 UNTIS_SERVER = os.environ.get("UNTIS_SERVER", "csgb.webuntis.com")
 
-# Nur für die automatische Migration deines bisherigen Einzel-Accounts (siehe migrate_legacy_user)
 LEGACY_UNTIS_USERNAME = os.environ.get("UNTIS_USERNAME", "")
 LEGACY_UNTIS_PASSWORD = os.environ.get("UNTIS_PASSWORD", "")
 
@@ -55,29 +48,10 @@ SECRET_KEY = os.environ.get("SECRET_KEY", "bitte-in-render-setzen-dev-only")
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 ADMIN_TOTP_SECRET = os.environ.get("ADMIN_TOTP_SECRET", "")
-try:
-    fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
-except (ValueError, Exception):
-    # Ein ungültig formatierter ENCRYPTION_KEY hat früher hier die komplette App beim
-    # Start crashen lassen (-> 503 bei jedem Request). Jetzt: WebUntis-Verknüpfung
-    # bleibt einfach deaktiviert, statt die ganze App lahmzulegen.
-    fernet = None
-    print("WARNUNG: ENCRYPTION_KEY ist ungültig formatiert (kein gültiger Fernet-Key) - "
-          "WebUntis-Verknüpfung ist deaktiviert. Key neu generieren, siehe README.")
-if not fernet:
-    print("WARNUNG: ENCRYPTION_KEY ist nicht gesetzt - WebUntis-Verknüpfung ist deaktiviert, "
-          "bis die Variable bei Render eingetragen wird.")
-
-# KI-Lernassistent
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-TUTOR_MODEL = os.environ.get("TUTOR_MODEL", "gemini-flash-latest")  # Alias, zeigt immer auf die neueste Flash-Version
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-
-APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:5000")
+fernet = Fernet(ENCRYPTION_KEY.encode()) if ENCRYPTION_KEY else None
 
 
 def try_untis_login(untis_username, untis_password):
-    """Prüft WebUntis-Zugangsdaten sofort, ohne dauerhafte Session. Gibt (ok, fehlertext) zurück."""
     try:
         s = webuntis.Session(
             server=UNTIS_SERVER, username=untis_username, password=untis_password,
@@ -88,18 +62,10 @@ def try_untis_login(untis_username, untis_password):
     except Exception as e:
         return False, str(e)
 
+
 app = Flask(__name__, static_folder="static", template_folder="templates")
-# Render sitzt als genau 1 Reverse-Proxy davor. ProxyFix sorgt dafür, dass
-# request.remote_addr die echte, von Render gesetzte Client-IP ist - und NICHT
-# ein von Angreifer:innen selbst mitgeschickter X-Forwarded-For-Wert (sonst
-# ließe sich die Login-Sperre unten durch eine gefälschte IP pro Versuch umgehen).
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 app.secret_key = SECRET_KEY
-app.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=True,
-    PERMANENT_SESSION_LIFETIME=dt.timedelta(days=30),
-)
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=True)
 
 # ==================== Datenbank ====================
 
@@ -133,7 +99,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            typ TEXT NOT NULL,              -- 'hausaufgabe' oder 'pruefung'
+            typ TEXT NOT NULL,
             fach TEXT NOT NULL,
             text TEXT NOT NULL,
             faellig TEXT,
@@ -176,7 +142,7 @@ def init_db():
             fach TEXT NOT NULL,
             note REAL NOT NULL,
             gewichtung REAL NOT NULL DEFAULT 1,
-            art TEXT,                        -- z.B. 'schriftlich', 'mündlich'
+            art TEXT,
             beschreibung TEXT,
             datum TEXT,
             erstellt TEXT NOT NULL
@@ -188,132 +154,61 @@ def init_db():
             scope TEXT NOT NULL DEFAULT 'user',
             attempt_time TEXT NOT NULL
         );
-
-        CREATE TABLE IF NOT EXISTS tutor_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,              -- 'user' oder 'assistant'
-            content TEXT NOT NULL,
-            level TEXT,                      -- 'hinweis' | 'schritt' | 'erklaerung' | 'loesung' | ''
-            fach TEXT,
-            erstellt TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS flashcard_sets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            fach TEXT NOT NULL,
-            thema TEXT NOT NULL,
-            erstellt TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS flashcards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            set_id INTEGER NOT NULL,
-            frage TEXT NOT NULL,
-            antwort TEXT NOT NULL
-        );
         """
     )
     conn.commit()
-
-    # --- Migration: falls eine ältere Version dieser App (ohne Login) schon
-    # Daten angelegt hat, diese automatisch dem ersten Nutzer zuordnen. ---
     migrate_legacy_data(conn)
-    migrate_billing_columns(conn)
-
     conn.close()
 
 
-def migrate_billing_columns(conn):
-    """Ergänzt Stripe/Abo-Spalten in 'users', falls die Tabelle schon vor
-    Einführung der Bezahlfunktion existiert hat."""
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-    if "lemonsqueezy_customer_id" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN lemonsqueezy_customer_id TEXT")
-    if "stripe_customer_id" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN stripe_customer_id TEXT")  # ungenutztes Überbleibsel, schadet nicht
-    if "subscription_status" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN subscription_status TEXT NOT NULL DEFAULT 'inactive'")
-    if "subscription_current_period_end" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN subscription_current_period_end TEXT")
-    conn.commit()
-
-
 def migrate_legacy_data(conn):
-    """Ordnet Daten aus der Einzel-Nutzer-Version einem echten Account zu,
-    damit beim Umstieg auf Accounts nichts verloren geht."""
     has_users = conn.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
     if has_users > 0:
-        return  # schon migriert oder gar keine alten Daten
-
-    has_old_tasks = conn.execute(
-        "SELECT COUNT(*) c FROM tasks WHERE user_id IS NULL"
-    ).fetchone()["c"] if column_exists(conn, "tasks", "user_id") else 0
-
+        return
     if not LEGACY_UNTIS_USERNAME:
-        return  # nichts zu migrieren / kein Alt-Account bekannt
+        return
 
     enc_pw = fernet.encrypt(LEGACY_UNTIS_PASSWORD.encode()).decode() if fernet else LEGACY_UNTIS_PASSWORD
     cur = conn.execute(
         "INSERT INTO users (username, password_hash, display_name, untis_username, untis_password_enc, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            LEGACY_UNTIS_USERNAME,
-            generate_password_hash("bitte-aendern"),
-            "Nico",
-            LEGACY_UNTIS_USERNAME,
-            enc_pw,
-            dt.datetime.now(TZ).isoformat(),
-        ),
+        (LEGACY_UNTIS_USERNAME, generate_password_hash("bitte-aendern"), "Nico",
+         LEGACY_UNTIS_USERNAME, enc_pw, dt.datetime.now(TZ).isoformat()),
     )
     legacy_user_id = cur.lastrowid
-
     for table in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot"):
         conn.execute(f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL", (legacy_user_id,))
-
     conn.commit()
-    print(
-        f"Alt-Daten migriert zu Account '{LEGACY_UNTIS_USERNAME}'. "
-        f"Vorläufiges Passwort: 'bitte-aendern' - bitte gleich nach dem ersten Login ändern!"
-    )
+    print(f"Alt-Daten migriert zu Account '{LEGACY_UNTIS_USERNAME}'. Vorläufiges Passwort: 'bitte-aendern'")
 
 
 # ==================== Auth-Hilfsfunktionen ====================
 
-
 MAX_ATTEMPTS = 5
 LOCKOUT_HOURS = 24
 
-# Wird verwendet, wenn ein Login-Versuch einen nicht existierenden Nutzernamen betrifft -
-# so dauert check_password_hash() in JEDEM Fall gleich lang (echter Hash oder Dummy-Hash),
-# und die Antwortzeit verrät nicht per Timing-Unterschied, ob der Nutzername existiert.
-DUMMY_PASSWORD_HASH = generate_password_hash("dummy-password-fuer-konstante-timing")
-
 
 def get_client_ip():
-    # request.remote_addr wird jetzt bereits von ProxyFix korrekt gesetzt.
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
     return request.remote_addr or "unknown"
 
 
-def is_locked_out(ip, scope="user", max_attempts=None, window_hours=None):
-    max_attempts = max_attempts if max_attempts is not None else MAX_ATTEMPTS
-    window_hours = window_hours if window_hours is not None else LOCKOUT_HOURS
+def is_locked_out(ip, scope="user"):
     conn = get_db()
-    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=window_hours)).isoformat()
+    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=LOCKOUT_HOURS)).isoformat()
     count = conn.execute(
         "SELECT COUNT(*) c FROM failed_logins WHERE ip = ? AND scope = ? AND attempt_time > ?", (ip, scope, cutoff)
     ).fetchone()["c"]
     conn.close()
-    return count >= max_attempts
+    return count >= MAX_ATTEMPTS
 
 
 def record_failed_login(ip, scope="user"):
     conn = get_db()
-    conn.execute(
-        "INSERT INTO failed_logins (ip, scope, attempt_time) VALUES (?, ?, ?)",
-        (ip, scope, dt.datetime.now(TZ).isoformat()),
-    )
+    conn.execute("INSERT INTO failed_logins (ip, scope, attempt_time) VALUES (?, ?, ?)",
+                 (ip, scope, dt.datetime.now(TZ).isoformat()))
     conn.commit()
     conn.close()
 
@@ -330,12 +225,7 @@ def login_required(f):
     def wrapper(*args, **kwargs):
         if "user_id" not in session:
             return jsonify({"error": "not_authenticated"}), 401
-        if current_user() is None:
-            # Account wurde z.B. von einem Admin gelöscht, während die Session noch gültig war.
-            session.clear()
-            return jsonify({"error": "not_authenticated"}), 401
         return f(*args, **kwargs)
-
     return wrapper
 
 
@@ -377,7 +267,7 @@ DEFAULT_SETTINGS = {
     "reminder_times": json.dumps(["17:30", "19:00", "21:30"]),
     "theme": "system",
     "klasse": "",
-    "notenskala": "unterstufe",  # oder "oberstufe" (0-15 Notenpunkte)
+    "notenskala": "unterstufe",
 }
 
 
@@ -402,7 +292,10 @@ def untis_login(user):
     ).login()
 
 
-def fetch_timetable_days(user, days_ahead=5):
+def fetch_timetable_days(user, start=None, end=None, days_ahead=5):
+    """Holt den Stundenplan. Ohne start/end: die nächsten `days_ahead` Tage ab heute.
+    Mit start/end (date-Objekte): genau dieser Zeitraum - z.B. für die Wochenansicht,
+    die auch bereits vergangene Tage der aktuellen Woche zeigen soll."""
     if not user.get("untis_username"):
         return []
     try:
@@ -411,8 +304,10 @@ def fetch_timetable_days(user, days_ahead=5):
         print(f"WebUntis-Login fehlgeschlagen ({user['username']}): {e}")
         return []
 
-    start = dt.date.today()
-    end = start + dt.timedelta(days=days_ahead)
+    if start is None:
+        start = dt.date.today()
+    if end is None:
+        end = start + dt.timedelta(days=days_ahead)
 
     try:
         table = session_.my_timetable(start=start, end=end)
@@ -426,18 +321,16 @@ def fetch_timetable_days(user, days_ahead=5):
 
     result = []
     for p in table:
-        result.append(
-            {
-                "date": p.start.date().isoformat(),
-                "start": p.start.strftime("%H:%M"),
-                "end": p.end.strftime("%H:%M"),
-                "subject": ", ".join(s.name for s in p.subjects) or "?",
-                "room": ", ".join(r.name for r in p.rooms) or "?",
-                "teacher": ", ".join(t.surname for t in p.teachers) or "?",
-                "code": p.code or "",
-                "info": p.text or "",
-            }
-        )
+        result.append({
+            "date": p.start.date().isoformat(),
+            "start": p.start.strftime("%H:%M"),
+            "end": p.end.strftime("%H:%M"),
+            "subject": ", ".join(s.name for s in p.subjects) or "?",
+            "room": ", ".join(r.name for r in p.rooms) or "?",
+            "teacher": ", ".join(t.surname for t in p.teachers) or "?",
+            "code": p.code or "",
+            "info": p.text or "",
+        })
     session_.logout()
     return result
 
@@ -455,13 +348,11 @@ def fetch_exams(user, days_ahead=90):
 
     result = []
     for e in exams:
-        result.append(
-            {
-                "name": getattr(e, "name", None) or getattr(e, "subject", "Klausur"),
-                "date": e.start.date().isoformat(),
-                "time": e.start.strftime("%H:%M"),
-            }
-        )
+        result.append({
+            "name": getattr(e, "name", None) or getattr(e, "subject", "Klausur"),
+            "date": e.start.date().isoformat(),
+            "time": e.start.strftime("%H:%M"),
+        })
     return result
 
 
@@ -470,19 +361,10 @@ def entry_key(entry):
 
 
 def diff_timetable(old_entries, new_entries):
-    """Vergleicht zwei Stundenplan-Stände.
-
-    Schritt 1: exakter Abgleich über (Datum, Startzeit, Fach). Das erkennt
-    Raum-, Lehrer- und Ausfall-Änderungen zuverlässig, da diese Felder
-    nicht im Schlüssel stecken.
-
-    Schritt 2: für alle dabei nicht zugeordneten Einträge folgt ein
-    zweiter Abgleich pro (Datum, Fach) in Start-Reihenfolge. Das fängt
-    genau den Fall ab, dass sich die Startzeit einer Stunde ändert –
-    ohne Schritt 2 würde eine verschobene Stunde fälschlich als
-    'entfernt' + 'neu hinzugekommen' gewertet, statt als 'geändert' mit
-    der konkreten Meldung ('X wurde von 10:15 auf 11:05 verschoben').
-    """
+    """Vergleicht zwei Stundenplan-Stände. Erst exakter Abgleich über
+    (Datum, Startzeit, Fach); übrig gebliebene Einträge werden zusätzlich
+    pro (Datum, Fach) in Startzeit-Reihenfolge gepaart, damit eine
+    verschobene Stunde als 'geändert' statt 'entfernt+neu' erkannt wird."""
     old_map = {entry_key(e): e for e in old_entries}
     new_map = {entry_key(e): e for e in new_entries}
 
@@ -537,22 +419,15 @@ def send_push(user_id, title, body, tag="allgemein"):
     if not VAPID_PRIVATE_KEY:
         print(f"[Push nicht konfiguriert] {title}: {body}")
         return
-
     conn = get_db()
     subs = conn.execute("SELECT endpoint, data FROM subscriptions WHERE user_id = ?", (user_id,)).fetchall()
     conn.close()
-
     payload = json.dumps({"title": title, "body": body, "tag": tag})
-
     for sub in subs:
         subscription_info = json.loads(sub["data"])
         try:
-            webpush(
-                subscription_info=subscription_info,
-                data=payload,
-                vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims={"sub": VAPID_CLAIMS_EMAIL},
-            )
+            webpush(subscription_info=subscription_info, data=payload,
+                    vapid_private_key=VAPID_PRIVATE_KEY, vapid_claims={"sub": VAPID_CLAIMS_EMAIL})
         except WebPushException as e:
             print(f"Push fehlgeschlagen für {sub['endpoint'][:40]}...: {e}")
             if "410" in str(e) or "404" in str(e):
@@ -572,121 +447,6 @@ def log_notification(user_id, titel, text, typ):
     conn.close()
 
 
-# ==================== KI-Lernassistent ====================
-
-TUTOR_LEVEL_INSTRUCTIONS = {
-    "hinweis": "Der/die Lernende möchte gerade nur einen kleinen 💡 Hinweis, keine Lösung. Gib einen kurzen Denkanstoß, keine Schritt-für-Schritt-Anleitung und keine fertige Antwort.",
-    "schritt": "Der/die Lernende möchte den 🧩 nächsten Schritt sehen, nicht die komplette Lösung. Erkläre nur, was als Nächstes zu tun ist, und lass den Rest offen.",
-    "erklaerung": "Der/die Lernende möchte eine 📖 Erklärung des Konzepts – verständlich, altersgerecht, mit einem kurzen Beispiel.",
-    "loesung": "Der/die Lernende möchte jetzt die ✅ vollständige Lösung sehen, inklusive Lösungsweg. Erkläre trotzdem kurz, wie man darauf kommt, statt nur das Ergebnis hinzuwerfen.",
-}
-
-
-def build_tutor_context(user, fach):
-    """Sammelt ein paar Signale aus den vorhandenen Nutzerdaten für Personalisierung."""
-    lines = []
-    if user.get("klasse"):
-        lines.append(f"Klasse: {user['klasse']}")
-    if fach:
-        lines.append(f"Aktuelles Fach: {fach}")
-
-    conn = get_db()
-    open_tasks = conn.execute(
-        "SELECT fach, text FROM tasks WHERE user_id=? AND erledigt=0 AND typ='hausaufgabe' "
-        "ORDER BY faellig IS NULL, faellig LIMIT 5",
-        (user["id"],),
-    ).fetchall()
-    weak = conn.execute(
-        "SELECT fach, AVG(note) avg_note, COUNT(*) c FROM grades WHERE user_id=? "
-        "GROUP BY fach HAVING c >= 2 ORDER BY avg_note DESC LIMIT 2",
-        (user["id"],),
-    ).fetchall()
-    conn.close()
-
-    if open_tasks:
-        lines.append("Offene Hausaufgaben: " + "; ".join(f"{t['fach']}: {t['text']}" for t in open_tasks))
-    if weak and get_setting(user["id"], "notenskala", "unterstufe") == "unterstufe":
-        # Bei der Notenskala 1-6 ist ein höherer Wert eine schlechtere Note.
-        lines.append("Fächer mit tendenziell schwächeren Noten: " + ", ".join(w["fach"] for w in weak))
-
-    return "\n".join(lines) if lines else "Keine weiteren Infos bekannt."
-
-
-def build_tutor_system_prompt(user, fach, level):
-    level_instruction = TUTOR_LEVEL_INSTRUCTIONS.get(
-        level, "Falls keine Hilfestufe angegeben ist: beginne mit einem Hinweis bzw. einer kurzen Erklärung "
-              "und biete an, bei Bedarf tiefer zu gehen."
-    )
-    return f"""Du bist der KI-Lernassistent in der Schulapp von {user.get('display_name') or 'einem Schüler/einer Schülerin'}. \
-Du bist ein freundlicher, geduldiger, persönlicher Tutor – kein gewöhnlicher Chatbot.
-
-PERSÖNLICHKEIT
-- Freundlich, motivierend, geduldig; natürlich, nicht roboterhaft
-- Verständlich und altersgerecht erklären, ohne unnötig lange Antworten
-- Fehler freundlich korrigieren, nichts erfinden – bei Unsicherheit ehrlich sagen
-
-LERNVERHALTEN
-Bei Aufgaben nicht sofort die Lösung geben. Erst verstehen, was der/die Lernende schon weiß, dann mit kleinen \
-Hinweisen arbeiten (z.B. "Was denkst du, wäre der erste Schritt?"), selbst nachdenken lassen und erst danach die \
-vollständige Lösung zeigen – außer die aktuelle Hilfestufe verlangt direkt danach (siehe unten).
-
-AKTUELLE HILFESTUFE
-{level_instruction}
-
-MOTIVATION
-Dezent und authentisch, nicht übertrieben (kein "Super! 🎉 Du bist unglaublich!"). Eher konkret: "Das war diesmal \
-deutlich besser." oder "Du hast den schwierigsten Schritt jetzt richtig gelöst."
-
-ANTWORTLÄNGE
-Kurz und gut lesbar, den/die Lernende nicht mit langen Antworten überfordern. Formeln/Code sauber in Markdown.
-
-KONTEXT ZUM NUTZER (nur verwenden, wenn gerade relevant – nicht aufdrängen)
-{build_tutor_context(user, fach)}"""
-
-
-def call_tutor_ai(system_prompt, history, max_tokens=1000):
-    if not GEMINI_API_KEY:
-        return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt in den Umgebungsvariablen)."
-
-    contents = [
-        {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
-        for m in history
-    ]
-
-    # Gemini antwortet gerade bei den kostenlosen Flash-Modellen häufiger mit 503
-    # (kurzzeitig überlastet). Das ist meist in 1-2 Sekunden vorbei, deshalb hier
-    # bis zu 3 Versuche mit kurzer, steigender Wartezeit, bevor der Fehler beim
-    # Nutzer ankommt.
-    last_error = None
-    for attempt in range(3):
-        try:
-            resp = requests.post(
-                GEMINI_API_URL.format(model=TUTOR_MODEL),
-                headers={"x-goog-api-key": GEMINI_API_KEY, "content-type": "application/json"},
-                json={
-                    "systemInstruction": {"parts": [{"text": system_prompt}]},
-                    "contents": contents,
-                    "generationConfig": {"maxOutputTokens": max_tokens},
-                },
-                timeout=30,
-            )
-            if resp.status_code in (503, 429) and attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            parts = data["candidates"][0]["content"]["parts"]
-            text = "".join(p.get("text", "") for p in parts)
-            return text.strip(), None
-        except (requests.exceptions.RequestException, KeyError, IndexError) as e:
-            last_error = e
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
-                continue
-
-    return None, "Der KI-Tutor ist gerade überlastet. Bitte in ein paar Sekunden nochmal versuchen."
-
-
 # ==================== Scheduler-Jobs (laufen für ALLE Nutzer) ====================
 
 
@@ -702,7 +462,6 @@ def job_check_timetable():
         uid = user["id"]
         if get_setting(uid, "notify_stundenplan") != "true":
             continue
-
         new_entries = fetch_timetable_days(user)
         if not new_entries:
             continue
@@ -713,13 +472,11 @@ def job_check_timetable():
 
         if old_entries:
             added, removed, changed = diff_timetable(old_entries, new_entries)
-
             for old, new in changed:
                 text = describe_change(old, new)
                 title = "⚠️ Unterricht fällt aus" if new["code"] == "cancelled" else "🔔 Stundenplan geändert"
                 send_push(uid, title, text, tag="stundenplan")
                 log_notification(uid, title, text, "stundenplan")
-
             for e in added:
                 text = f"Neu im Plan: {e['subject']} am {e['date']} um {e['start']} Uhr."
                 send_push(uid, "🔔 Stundenplan geändert", text, tag="stundenplan")
@@ -739,7 +496,6 @@ def job_reminder():
         uid = user["id"]
         if get_setting(uid, "notify_lernen") != "true":
             continue
-
         conn = get_db()
         open_tasks = conn.execute(
             "SELECT fach FROM tasks WHERE user_id = ? AND typ = 'hausaufgabe' AND erledigt = 0", (uid,)
@@ -767,12 +523,10 @@ def job_exam_countdown():
             continue
 
         exams = [{"name": e["name"], "date": e["date"]} for e in fetch_exams(user)]
-
         conn = get_db()
         manual = conn.execute(
             "SELECT fach, text, faellig FROM tasks WHERE user_id = ? AND typ = 'pruefung' "
-            "AND faellig IS NOT NULL AND erledigt = 0",
-            (uid,),
+            "AND faellig IS NOT NULL AND erledigt = 0", (uid,)
         ).fetchall()
         conn.close()
         exams += [{"name": f"{m['fach']}: {m['text']}", "date": m["faellig"]} for m in manual]
@@ -798,17 +552,13 @@ def setup_scheduler():
 
 
 def reschedule_all_reminders():
-    """Sammelt alle einzigartigen Erinnerungszeiten über alle Nutzer hinweg.
-    (job_reminder selbst filtert dann pro Nutzer nach dessen eigenen Einstellungen.)"""
     for job in scheduler.get_jobs():
         if job.id.startswith("reminder_"):
             scheduler.remove_job(job.id)
-
     all_times = set()
     for user in all_users():
         times = json.loads(get_setting(user["id"], "reminder_times", "[]"))
         all_times.update(times)
-
     for i, t in enumerate(sorted(all_times)):
         hour, minute = map(int, t.split(":"))
         scheduler.add_job(job_reminder, "cron", hour=hour, minute=minute, id=f"reminder_{i}")
@@ -817,17 +567,8 @@ def reschedule_all_reminders():
 # ==================== Auth-Routen ====================
 
 
-def validate_password(pw):
-    if len(pw) < 8:
-        return False, "Das Passwort muss mindestens 8 Zeichen lang sein."
-    if not re.search(r"[^A-Za-z0-9]", pw):
-        return False, "Das Passwort muss mindestens ein Sonderzeichen enthalten."
-    return True, None
-
-
 @app.route("/api/register", methods=["POST"])
 def api_register():
-    ip = get_client_ip()
     data = request.get_json()
     username = data.get("username", "").strip()
     password = data.get("password", "")
@@ -838,20 +579,7 @@ def api_register():
     if not username or not password:
         return jsonify({"ok": False, "error": "Bitte Benutzername und Passwort ausfüllen."}), 400
 
-    pw_ok, pw_err = validate_password(password)
-    if not pw_ok:
-        return jsonify({"ok": False, "error": pw_err}), 400
-
     has_untis = bool(untis_username and untis_password)
-
-    if has_untis and not fernet:
-        # Ohne ENCRYPTION_KEY würde das WebUntis-Passwort im Klartext in der DB landen -
-        # lieber die Verknüpfung verweigern, als das stillschweigend zu tun.
-        return jsonify({
-            "ok": False,
-            "error": "WebUntis-Verknüpfung ist serverseitig noch nicht sicher eingerichtet "
-                     "(ENCRYPTION_KEY fehlt). Bitte ohne WebUntis registrieren oder Adminstrator:in fragen.",
-        }), 400
 
     conn = get_db()
     exists = conn.execute("SELECT 1 FROM users WHERE lower(username) = lower(?)", (username,)).fetchone()
@@ -869,21 +597,11 @@ def api_register():
     conn.close()
 
     if has_untis:
-        # Eigenes Rate-Limit für WebUntis-Prüfungen: sonst ließe sich die Registrierung
-        # missbrauchen, um fremde WebUntis-Passwörter unbegrenzt durchzuprobieren.
-        if is_locked_out(ip, "untis_check"):
-            return jsonify({
-                "ok": False,
-                "error": f"Zu viele Fehlversuche. Bitte in {LOCKOUT_HOURS} Stunden erneut probieren.",
-            }), 429
         ok, err = try_untis_login(untis_username, untis_password)
         if not ok:
-            record_failed_login(ip, "untis_check")
             return jsonify({"ok": False, "error": f"WebUntis-Zugangsdaten konnten nicht bestätigt werden. ({err})"}), 400
-        clear_failed_logins(ip, "untis_check")
 
     conn = get_db()
-
     enc_pw = (fernet.encrypt(untis_password.encode()).decode() if fernet else untis_password) if has_untis else ""
     cur = conn.execute(
         "INSERT INTO users (username, password_hash, display_name, untis_username, untis_password_enc, created_at) "
@@ -896,9 +614,7 @@ def api_register():
 
     ensure_default_settings(user_id)
     reschedule_all_reminders()
-
     session["user_id"] = user_id
-    session.permanent = True
     return jsonify({"ok": True, "username": username, "display_name": display_name})
 
 
@@ -916,42 +632,18 @@ def api_login():
     row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     conn.close()
 
-    password_ok = check_password_hash(row["password_hash"] if row else DUMMY_PASSWORD_HASH, password)
-    if not row or not password_ok:
+    if not row or not check_password_hash(row["password_hash"], password):
         record_failed_login(ip, "user")
         return jsonify({"ok": False, "error": "Benutzername oder Passwort falsch."}), 401
 
     clear_failed_logins(ip, "user")
     session["user_id"] = row["id"]
-    session.permanent = True
     return jsonify({"ok": True, "username": row["username"], "display_name": row["display_name"]})
 
 
 @app.route("/api/logout", methods=["POST"])
 def api_logout():
     session.clear()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/password", methods=["POST"])
-@login_required
-def api_change_password():
-    data = request.get_json()
-    old_password = data.get("old_password", "")
-    new_password = data.get("new_password", "")
-
-    user = current_user()
-    if not check_password_hash(user["password_hash"], old_password):
-        return jsonify({"ok": False, "error": "Aktuelles Passwort ist falsch."}), 400
-
-    pw_ok, pw_err = validate_password(new_password)
-    if not pw_ok:
-        return jsonify({"ok": False, "error": pw_err}), 400
-
-    conn = get_db()
-    conn.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(new_password), user["id"]))
-    conn.commit()
-    conn.close()
     return jsonify({"ok": True})
 
 
@@ -966,27 +658,7 @@ def api_me():
     return jsonify({"authenticated": True, "username": user["username"], "display_name": user["display_name"]})
 
 
-# ==================== API-Routen (Daten) ====================
-
-
-@app.after_request
-def set_security_headers(response):
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self'; "
-        "frame-ancestors 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self';"
-    )
-    return response
+# ==================== Seiten & Admin ====================
 
 
 @app.route("/")
@@ -1015,11 +687,6 @@ def get_users_overview():
     return rows
 
 
-@app.route("/impressum")
-def legal_impressum():
-    return render_template("impressum.html")
-
-
 @app.route("/admin")
 def admin_dashboard():
     if not admin_authorized():
@@ -1042,7 +709,6 @@ def admin_login():
 
     password = request.form.get("password", "")
     code = request.form.get("code", "")
-
     pw_ok = ADMIN_PASSWORD_HASH and check_password_hash(ADMIN_PASSWORD_HASH, password)
     totp_ok = ADMIN_TOTP_SECRET and pyotp.TOTP(ADMIN_TOTP_SECRET).verify(code, valid_window=1)
 
@@ -1106,8 +772,7 @@ def admin_delete(user_id):
     if not admin_authorized():
         return jsonify({"error": "unauthorized"}), 403
     conn = get_db()
-    conn.execute("DELETE FROM flashcards WHERE set_id IN (SELECT id FROM flashcard_sets WHERE user_id=?)", (user_id,))
-    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades", "tutor_messages", "flashcard_sets"):
+    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades"):
         conn.execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
@@ -1151,10 +816,8 @@ def api_test_push():
     conn = get_db()
     count = conn.execute("SELECT COUNT(*) as c FROM subscriptions WHERE user_id = ?", (uid,)).fetchone()["c"]
     conn.close()
-
     if count == 0:
         return jsonify({"ok": False, "error": "Keine Push-Registrierung gefunden. Erst 'Push aktivieren' antippen."})
-
     send_push(uid, "🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", tag="test")
     log_notification(uid, "🔔 Testnachricht", "Wenn du das liest, funktioniert alles!", "test")
     return jsonify({"ok": True, "subscriptions": count})
@@ -1180,7 +843,21 @@ def api_debug_exams_raw():
 @app.route("/api/timetable")
 @login_required
 def api_timetable():
-    return jsonify(fetch_timetable_days(current_user()))
+    """Unterstützt entweder ?days=N (nächste N Tage ab heute, Standard)
+    oder ?start=YYYY-MM-DD&end=YYYY-MM-DD (fester Zeitraum, z.B. für die
+    Wochenansicht - kann auch bereits vergangene Tage der Woche zeigen)."""
+    start_str = request.args.get("start")
+    end_str = request.args.get("end")
+    days = request.args.get("days", type=int)
+
+    kwargs = {}
+    if start_str and end_str:
+        kwargs["start"] = dt.date.fromisoformat(start_str)
+        kwargs["end"] = dt.date.fromisoformat(end_str)
+    elif days:
+        kwargs["days_ahead"] = days
+
+    return jsonify(fetch_timetable_days(current_user(), **kwargs))
 
 
 @app.route("/api/exams")
@@ -1266,9 +943,7 @@ def api_notifications():
 @login_required
 def api_notification_read(note_id):
     conn = get_db()
-    conn.execute(
-        "UPDATE notifications SET gelesen = 1 WHERE id = ? AND user_id = ?", (note_id, session["user_id"])
-    )
+    conn.execute("UPDATE notifications SET gelesen = 1 WHERE id = ? AND user_id = ?", (note_id, session["user_id"]))
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
@@ -1287,16 +962,9 @@ def api_grades():
         conn.execute(
             "INSERT INTO grades (user_id, fach, note, gewichtung, art, beschreibung, datum, erstellt) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                uid,
-                data["fach"],
-                float(data["note"]),
-                float(data.get("gewichtung", 1)),
-                data.get("art", ""),
-                data.get("beschreibung", ""),
-                data.get("datum") or dt.date.today().isoformat(),
-                dt.datetime.now(TZ).isoformat(),
-            ),
+            (uid, data["fach"], float(data["note"]), float(data.get("gewichtung", 1)),
+             data.get("art", ""), data.get("beschreibung", ""),
+             data.get("datum") or dt.date.today().isoformat(), dt.datetime.now(TZ).isoformat()),
         )
         conn.commit()
 
@@ -1313,255 +981,6 @@ def api_grade_delete(grade_id):
     conn.commit()
     conn.close()
     return jsonify({"ok": True})
-
-
-# ==================== Karteikarten ====================
-
-
-def _extract_json_block(text):
-    """Holt den ersten vollständigen JSON-Array-/Objekt-Block aus einer KI-Antwort,
-    auch wenn die KI sich nicht exakt an 'nur JSON' hält (Codeblock-Zäune,
-    erklärender Text davor/danach etc.)."""
-    text = text.strip()
-    text = re.sub(r"^\s*```[a-zA-Z]*\s*", "", text)
-    text = re.sub(r"\s*```\s*$", "", text)
-    text = text.strip()
-
-    array_match = re.search(r"\[.*\]", text, re.DOTALL)
-    obj_match = re.search(r"\{.*\}", text, re.DOTALL)
-    if array_match and (not obj_match or array_match.start() <= obj_match.start()):
-        return array_match.group(0)
-    if obj_match:
-        return obj_match.group(0)
-    return text
-
-
-def _extract_qa_pairs_fallback(text):
-    """Letzter Rettungsanker: zieht frage/antwort-Paare direkt per Regex aus dem Text,
-    auch wenn kein gültiges JSON vorliegt (z.B. abgeschnittene Antwort oder nicht
-    escapte Anführungszeichen im Antworttext)."""
-    pattern = re.compile(
-        r'"(?:frage|question|q)"\s*:\s*"(.*?)"\s*,\s*"(?:antwort|answer|a)"\s*:\s*"(.*?)"\s*(?:,|\})',
-        re.IGNORECASE | re.DOTALL,
-    )
-    cards = []
-    for frage, antwort in pattern.findall(text):
-        frage = frage.replace('\\"', '"').replace("\\n", " ").strip()
-        antwort = antwort.replace('\\"', '"').replace("\\n", " ").strip()
-        if frage and antwort:
-            cards.append({"frage": frage, "antwort": antwort})
-    return cards
-
-
-def generate_flashcards(fach, thema, anzahl=8):
-    if not GEMINI_API_KEY:
-        return None, "Der KI-Tutor ist noch nicht eingerichtet (GEMINI_API_KEY fehlt)."
-
-    system_prompt = (
-        f"Du erstellst Karteikarten zum Lernen für Schüler:innen. Erzeuge genau {anzahl} Karteikarten "
-        f'zum Fach "{fach}", Thema "{thema}". Antworte AUSSCHLIESSLICH mit einem JSON-Array, keine '
-        "Erklärung, keine Markdown-Codeblöcke, kein Text davor oder danach. Format: "
-        '[{"frage": "...", "antwort": "..."}]. Fragen kurz und präzise, Antworten SEHR kurz (max. 1 Satz), '
-        "altersgerecht für Schüler:innen. Nutze in den Texten keine Anführungszeichen."
-    )
-    # Mehr Tokens als beim normalen Chat, damit die Antwort bei 8 Karten nicht
-    # mitten im JSON abgeschnitten wird.
-    text, error = call_tutor_ai(
-        system_prompt,
-        [{"role": "user", "content": f"Erstelle die Karteikarten zu {thema} ({fach})."}],
-        max_tokens=2048,
-    )
-    if error:
-        return None, error
-
-    cards = []
-    try:
-        parsed = json.loads(_extract_json_block(text))
-        raw_cards = (
-            next((v for v in parsed.values() if isinstance(v, list)), None)
-            if isinstance(parsed, dict)
-            else parsed
-        )
-        if isinstance(raw_cards, list):
-            for c in raw_cards:
-                if not isinstance(c, dict):
-                    continue
-                frage = c.get("frage") or c.get("question") or c.get("q")
-                antwort = c.get("antwort") or c.get("answer") or c.get("a")
-                if frage and antwort:
-                    cards.append({"frage": str(frage).strip(), "antwort": str(antwort).strip()})
-    except Exception:
-        pass
-
-    if not cards:
-        # JSON war ungültig oder abgeschnitten - Frage/Antwort-Paare notfalls direkt
-        # per Regex aus dem Rohtext ziehen, statt komplett aufzugeben.
-        cards = _extract_qa_pairs_fallback(text)
-
-    if not cards:
-        return None, "Antwort konnte nicht als Karteikarten gelesen werden. Bitte nochmal versuchen."
-    return cards, None
-
-
-@app.route("/api/flashcards/generate", methods=["POST"])
-@login_required
-def api_flashcards_generate():
-    data = request.get_json()
-    fach = (data.get("fach") or "").strip()
-    thema = (data.get("thema") or "").strip()
-    if not fach or not thema:
-        return jsonify({"ok": False, "error": "Bitte Fach und Thema angeben."}), 400
-
-    uid = session["user_id"]
-    if tutor_rate_limited(uid):
-        return jsonify({
-            "ok": False,
-            "error": f"Maximal {TUTOR_RATE_LIMIT_PER_HOUR} KI-Anfragen pro Stunde. Bitte gleich nochmal versuchen.",
-        }), 429
-
-    cards, error = generate_flashcards(fach, thema)
-    if error:
-        return jsonify({"ok": False, "error": error})
-
-    conn = get_db()
-    # Zählt als KI-Anfrage fürs Rate-Limit, genau wie eine Tutor-Chat-Nachricht
-    conn.execute(
-        "INSERT INTO tutor_messages (user_id, role, content, level, fach, erstellt) VALUES (?,?,?,?,?,?)",
-        (uid, "user", f"[Karteikarten generiert: {thema}]", "", fach, dt.datetime.now(TZ).isoformat()),
-    )
-    cur = conn.execute(
-        "INSERT INTO flashcard_sets (user_id, fach, thema, erstellt) VALUES (?,?,?,?)",
-        (uid, fach, thema, dt.datetime.now(TZ).isoformat()),
-    )
-    set_id = cur.lastrowid
-    conn.executemany(
-        "INSERT INTO flashcards (set_id, frage, antwort) VALUES (?,?,?)",
-        [(set_id, c["frage"], c["antwort"]) for c in cards],
-    )
-    conn.commit()
-    conn.close()
-
-    return jsonify({"ok": True, "set_id": set_id})
-
-
-@app.route("/api/flashcards/sets")
-@login_required
-def api_flashcards_sets():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT fs.id, fs.fach, fs.thema, fs.erstellt, COUNT(fc.id) AS anzahl "
-        "FROM flashcard_sets fs LEFT JOIN flashcards fc ON fc.set_id = fs.id "
-        "WHERE fs.user_id=? GROUP BY fs.id ORDER BY fs.id DESC",
-        (session["user_id"],),
-    ).fetchall()
-    conn.close()
-    return jsonify([dict(r) for r in rows])
-
-
-@app.route("/api/flashcards/sets/<int:set_id>", methods=["GET", "DELETE"])
-@login_required
-def api_flashcards_set_detail(set_id):
-    uid = session["user_id"]
-    conn = get_db()
-    owns = conn.execute("SELECT 1 FROM flashcard_sets WHERE id=? AND user_id=?", (set_id, uid)).fetchone()
-    if not owns:
-        conn.close()
-        return jsonify({"error": "not_found"}), 404
-
-    if request.method == "DELETE":
-        conn.execute("DELETE FROM flashcards WHERE set_id=?", (set_id,))
-        conn.execute("DELETE FROM flashcard_sets WHERE id=?", (set_id,))
-        conn.commit()
-        conn.close()
-        return jsonify({"ok": True})
-
-    cards = conn.execute("SELECT id, frage, antwort FROM flashcards WHERE set_id=?", (set_id,)).fetchall()
-    conn.close()
-    return jsonify([dict(c) for c in cards])
-
-
-# ==================== KI-Lernassistent (Routen) ====================
-
-
-@app.route("/api/tutor/history", methods=["GET", "DELETE"])
-@login_required
-def api_tutor_history():
-    uid = session["user_id"]
-    if request.method == "DELETE":
-        conn = get_db()
-        conn.execute("DELETE FROM tutor_messages WHERE user_id=?", (uid,))
-        conn.commit()
-        conn.close()
-        return jsonify({"ok": True})
-
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT id, role, content, level, fach, erstellt FROM tutor_messages WHERE user_id=? "
-        "ORDER BY id DESC LIMIT 40",
-        (uid,),
-    ).fetchall()
-    conn.close()
-    return jsonify([dict(r) for r in reversed(rows)])
-
-
-TUTOR_RATE_LIMIT_PER_HOUR = 30
-
-
-def tutor_rate_limited(user_id):
-    conn = get_db()
-    cutoff = (dt.datetime.now(TZ) - dt.timedelta(hours=1)).isoformat()
-    count = conn.execute(
-        "SELECT COUNT(*) c FROM tutor_messages WHERE user_id=? AND role='user' AND erstellt > ?",
-        (user_id, cutoff),
-    ).fetchone()["c"]
-    conn.close()
-    return count >= TUTOR_RATE_LIMIT_PER_HOUR
-
-
-@app.route("/api/tutor/chat", methods=["POST"])
-@login_required
-def api_tutor_chat():
-    data = request.get_json()
-    message = (data.get("message") or "").strip()
-    level = data.get("level") or ""
-    fach = (data.get("fach") or "").strip()
-    if not message:
-        return jsonify({"ok": False, "error": "Leere Nachricht."}), 400
-
-    user = current_user()
-    uid = user["id"]
-
-    if tutor_rate_limited(uid):
-        return jsonify({"ok": False, "error": f"Maximal {TUTOR_RATE_LIMIT_PER_HOUR} Nachrichten pro Stunde. Bitte gleich nochmal versuchen."}), 429
-
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO tutor_messages (user_id, role, content, level, fach, erstellt) VALUES (?,?,?,?,?,?)",
-        (uid, "user", message, level, fach, dt.datetime.now(TZ).isoformat()),
-    )
-    conn.commit()
-
-    rows = conn.execute(
-        "SELECT role, content FROM tutor_messages WHERE user_id=? ORDER BY id DESC LIMIT 16", (uid,)
-    ).fetchall()
-    conn.close()
-    history = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-
-    system_prompt = build_tutor_system_prompt(user, fach, level)
-    reply, error = call_tutor_ai(system_prompt, history)
-
-    if error:
-        return jsonify({"ok": False, "error": error})
-
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO tutor_messages (user_id, role, content, level, fach, erstellt) VALUES (?,?,?,?,?,?)",
-        (uid, "assistant", reply, level, fach, dt.datetime.now(TZ).isoformat()),
-    )
-    conn.commit()
-    conn.close()
-
-    return jsonify({"ok": True, "reply": reply})
 
 
 init_db()
