@@ -487,7 +487,14 @@ document.getElementById("test-untis-btn").addEventListener("click", async () => 
   const status = document.getElementById("untis-status");
   status.textContent = "Teste Verbindung …";
   const result = await api("/api/untis/test", { method: "POST" });
-  status.textContent = result.ok ? "✅ WebUntis-Login funktioniert." : `❌ ${result.error || "Verbindung fehlgeschlagen."}`;
+  if (result.ok) {
+    const countText = Number.isFinite(result.count) ? ` ${result.count} Stunden gefunden.` : "";
+    const sourceText = result.source ? ` Quelle: ${result.source}.` : "";
+    status.textContent = `✅ WebUntis funktioniert.${countText}${sourceText}`;
+    await loadAll();
+  } else {
+    status.textContent = `❌ ${result.error || "Verbindung fehlgeschlagen."}`;
+  }
 });
 
 document.getElementById("disconnect-untis-btn").addEventListener("click", async () => {
