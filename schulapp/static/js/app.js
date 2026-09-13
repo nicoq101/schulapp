@@ -20,14 +20,22 @@ function haptic(ms = 8) {
 
 // ==================== Hilfsfunktionen ====================
 
+function dateToLocalISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  return dateToLocalISO(new Date());
 }
 
 function addDaysISO(days) {
   const d = new Date();
+  d.setHours(12, 0, 0, 0);
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return dateToLocalISO(d);
 }
 
 function fmtDate(iso) {
@@ -41,16 +49,24 @@ function weekdayName(iso) {
 }
 
 function mondayOfWeek(isoDate) {
-  const d = new Date(isoDate + "T00:00:00");
+  const d = new Date(isoDate + "T12:00:00");
   const day = (d.getDay() + 6) % 7; // 0 = Montag
   d.setDate(d.getDate() - day);
-  return d.toISOString().slice(0, 10);
+  return dateToLocalISO(d);
 }
 
 function addDaysToISO(iso, days) {
-  const d = new Date(iso + "T00:00:00");
+  const d = new Date(iso + "T12:00:00");
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return dateToLocalISO(d);
+}
+
+function mondayForPlan() {
+  const today = todayISO();
+  const d = new Date(today + "T12:00:00");
+  const monday = mondayOfWeek(today);
+  // Am Wochenende direkt die kommende Schulwoche anzeigen.
+  return (d.getDay() === 0 || d.getDay() === 6) ? addDaysToISO(monday, 7) : monday;
 }
 
 async function api(path, options = {}) {
@@ -90,7 +106,7 @@ async function loadAll() {
 }
 
 async function loadWeekTimetable() {
-  const monday = mondayOfWeek(todayISO());
+  const monday = mondayForPlan();
   const sunday = addDaysToISO(monday, 6);
   state.weekTimetable = await api(`/api/timetable?start=${monday}&end=${sunday}`);
   renderPlan();
@@ -307,7 +323,7 @@ function renderPlan() {
 
   let dayKeys;
   if (planMode === "woche") {
-    const monday = mondayOfWeek(todayISO());
+    const monday = mondayForPlan();
     dayKeys = Array.from({ length: 7 }, (_, i) => addDaysToISO(monday, i));
   } else {
     dayKeys = Object.keys(byDay).sort().slice(0, 5);
