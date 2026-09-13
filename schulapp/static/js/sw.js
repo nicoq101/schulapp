@@ -1,5 +1,5 @@
-const CACHE_NAME = "schulapp-v4";
-const CORE_ASSETS = ["/", "/static/css/style.css", "/static/js/app.js?v=20260913-4", "/static/manifest.json"];
+const CACHE_NAME = "schulapp-v5";
+const CORE_ASSETS = ["/", "/static/css/style.css", "/static/js/app.js?v=20260913-5", "/static/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE_ASSETS)));

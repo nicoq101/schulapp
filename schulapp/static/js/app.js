@@ -73,8 +73,14 @@ async function api(path, options = {}) {
   const res = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
+    cache: "no-store",
     ...options,
   });
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    const text = await res.text();
+    return { ok: false, error: `Serverfehler ${res.status}: ${text.slice(0, 180)}` };
+  }
   return res.json();
 }
 
@@ -501,16 +507,29 @@ document.getElementById("save-untis-btn").addEventListener("click", async () => 
 
 document.getElementById("test-untis-btn").addEventListener("click", async () => {
   const status = document.getElementById("untis-status");
-  status.textContent = "Teste Verbindung …";
+  const btn = document.getElementById("test-untis-btn");
+  btn.disabled = true;
+  status.textContent = "Prüfe Login + persönlichen Plan + Schüler-ID + Klasse …";
   const result = await api("/api/untis/test", { method: "POST" });
+
+  const login = result.login || {};
+  const loginInfo = result.login_ok
+    ? `personType=${login.personType ?? "?"}, personId=${login.personId ?? "?"}, klasseId=${login.klasseId ?? "?"}`
+    : "";
+  const attempts = (result.attempts || []).map((a) => {
+    if (a.ok) return `${a.source}: ${a.count}`;
+    return `${a.source}: FEHLER ${a.error || "unbekannt"}`;
+  }).join(" | ");
+
   if (result.ok) {
-    const countText = Number.isFinite(result.count) ? ` ${result.count} Stunden gefunden.` : "";
-    const sourceText = result.source ? ` Quelle: ${result.source}.` : "";
-    status.textContent = `✅ WebUntis funktioniert.${countText}${sourceText}`;
+    status.textContent = `✅ ${result.count} Stunden gefunden über ${result.source}. ${loginInfo}`;
+    state.weekTimetable = [];
     await loadAll();
+    if (planMode === "woche") await loadWeekTimetable();
   } else {
-    status.textContent = `❌ ${result.error || "Verbindung fehlgeschlagen."}`;
+    status.textContent = `❌ ${result.error || "Verbindung fehlgeschlagen."} ${loginInfo}${attempts ? ` | ${attempts}` : ""}`;
   }
+  btn.disabled = false;
 });
 
 document.getElementById("disconnect-untis-btn").addEventListener("click", async () => {
