@@ -479,8 +479,11 @@ async function loadUntisSettings() {
   document.getElementById("setting-untis-username").value = data.username || "";
   document.getElementById("setting-untis-server").value = data.server || "";
   document.getElementById("setting-untis-school").value = data.school || "";
+  document.getElementById("setting-untis-student-firstname").value = data.student_firstname || "";
+  document.getElementById("setting-untis-student-surname").value = data.student_surname || "";
+  const studentInfo = data.student_id ? ` Schüler-ID ${data.student_id} ist gespeichert.` : "";
   document.getElementById("untis-status").textContent = data.connected
-    ? "Verbunden. Mit 'Verbindung testen' kannst du den Login prüfen."
+    ? `Verbunden.${studentInfo} Mit 'Verbindung testen' kannst du Login + Stundenplan prüfen.`
     : "Noch kein WebUntis-Konto verbunden.";
 }
 
@@ -494,6 +497,8 @@ document.getElementById("save-untis-btn").addEventListener("click", async () => 
       password: document.getElementById("setting-untis-password").value,
       server: document.getElementById("setting-untis-server").value.trim(),
       school: document.getElementById("setting-untis-school").value.trim(),
+      student_firstname: document.getElementById("setting-untis-student-firstname").value.trim(),
+      student_surname: document.getElementById("setting-untis-student-surname").value.trim(),
     }),
   });
   if (!result.ok) {
@@ -517,9 +522,9 @@ document.getElementById("test-untis-btn").addEventListener("click", async () => 
     ? `personType=${login.personType ?? "?"}, personId=${login.personId ?? "?"}, klasseId=${login.klasseId ?? "?"}`
     : "";
   const attempts = (result.attempts || []).map((a) => {
-    if (a.ok) return `${a.source}: ${a.count}`;
-    return `${a.source}: FEHLER ${a.error || "unbekannt"}`;
-  }).join(" | ");
+    if (a.ok) return `• ${a.source}: ${a.count}${a.note ? ` (${a.note})` : ""}`;
+    return `• ${a.source}: FEHLER ${a.error || "unbekannt"}`;
+  }).join("\n");
 
   if (result.ok) {
     status.textContent = `✅ ${result.count} Stunden gefunden über ${result.source}. ${loginInfo}`;
@@ -527,7 +532,7 @@ document.getElementById("test-untis-btn").addEventListener("click", async () => 
     await loadAll();
     if (planMode === "woche") await loadWeekTimetable();
   } else {
-    status.textContent = `❌ ${result.error || "Verbindung fehlgeschlagen."} ${loginInfo}${attempts ? ` | ${attempts}` : ""}`;
+    status.textContent = `❌ ${result.error || "Verbindung fehlgeschlagen."}${loginInfo ? `\n${loginInfo}` : ""}${attempts ? `\n${attempts}` : ""}`;
   }
   btn.disabled = false;
 });

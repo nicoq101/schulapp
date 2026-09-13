@@ -1,4 +1,4 @@
-const CACHE_NAME = "schulapp-v5";
+const CACHE_NAME = "schulapp-v6";
 const CORE_ASSETS = ["/", "/static/css/style.css", "/static/js/app.js?v=20260913-5", "/static/manifest.json"];
 
 self.addEventListener("install", (event) => {
