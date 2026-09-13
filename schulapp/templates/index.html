@@ -206,7 +206,10 @@
       <div class="field"><label>WebUntis-Passwort</label><input type="password" id="setting-untis-password" placeholder="Nur zum Ändern neu eingeben" /></div>
       <div class="field"><label>WebUntis-Server</label><input type="text" id="setting-untis-server" placeholder="z.B. csgb.webuntis.com" /></div>
       <div class="field"><label>Schulname / school-Parameter</label><input type="text" id="setting-untis-school" placeholder="z.B. csgb" /></div>
-      <div class="sub" id="untis-status" style="margin: 6px 0 12px;">Status wird geladen …</div>
+      <div class="field"><label>Schüler – Vorname</label><input type="text" id="setting-untis-student-firstname" placeholder="Exakt wie in WebUntis" autocomplete="off" /></div>
+      <div class="field"><label>Schüler – Nachname</label><input type="text" id="setting-untis-student-surname" placeholder="Exakt wie in WebUntis" autocomplete="off" /></div>
+      <div class="sub" style="margin:-2px 0 10px;">Wichtig bei Elternkonten oder wenn WebUntis beim Login keine brauchbare Schüler-ID liefert.</div>
+      <div class="sub" id="untis-status" style="margin: 6px 0 12px; white-space: pre-wrap; word-break: break-word;">Status wird geladen …</div>
       <button class="btn-primary" id="save-untis-btn">WebUntis verbinden / aktualisieren</button>
       <button class="btn-primary" id="test-untis-btn" style="margin-top:8px;">Verbindung testen</button>
       <button class="btn-primary" id="disconnect-untis-btn" style="margin-top:8px;">WebUntis trennen</button>
@@ -270,6 +273,6 @@
 
 </div>
 
-<script src="/static/js/app.js?v=20260913-5"></script>
+<script src="/static/js/app.js?v=20260913-6"></script>
 </body>
 </html>
