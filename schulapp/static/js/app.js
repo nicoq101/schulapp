@@ -427,6 +427,7 @@ function renderEinstellungen() {
   document.getElementById("setting-name").value = state.settings.name || "";
   document.getElementById("setting-klasse").value = state.settings.klasse || "";
 
+  loadUntisSettings();
   renderTimeChips();
 }
 
@@ -448,6 +449,53 @@ document.getElementById("save-profile-btn").addEventListener("click", async () =
   state.settings.name = name;
   state.settings.klasse = klasse;
   renderGreeting();
+});
+
+
+async function loadUntisSettings() {
+  const data = await api("/api/untis");
+  document.getElementById("setting-untis-username").value = data.username || "";
+  document.getElementById("setting-untis-server").value = data.server || "";
+  document.getElementById("setting-untis-school").value = data.school || "";
+  document.getElementById("untis-status").textContent = data.connected
+    ? "Verbunden. Mit 'Verbindung testen' kannst du den Login prüfen."
+    : "Noch kein WebUntis-Konto verbunden.";
+}
+
+document.getElementById("save-untis-btn").addEventListener("click", async () => {
+  const status = document.getElementById("untis-status");
+  status.textContent = "Prüfe Zugang …";
+  const result = await api("/api/untis", {
+    method: "POST",
+    body: JSON.stringify({
+      username: document.getElementById("setting-untis-username").value.trim(),
+      password: document.getElementById("setting-untis-password").value,
+      server: document.getElementById("setting-untis-server").value.trim(),
+      school: document.getElementById("setting-untis-school").value.trim(),
+    }),
+  });
+  if (!result.ok) {
+    status.textContent = result.error || "WebUntis-Verbindung fehlgeschlagen.";
+    return;
+  }
+  document.getElementById("setting-untis-password").value = "";
+  status.textContent = "✅ WebUntis erfolgreich verbunden.";
+  await loadAll();
+});
+
+document.getElementById("test-untis-btn").addEventListener("click", async () => {
+  const status = document.getElementById("untis-status");
+  status.textContent = "Teste Verbindung …";
+  const result = await api("/api/untis/test", { method: "POST" });
+  status.textContent = result.ok ? "✅ WebUntis-Login funktioniert." : `❌ ${result.error || "Verbindung fehlgeschlagen."}`;
+});
+
+document.getElementById("disconnect-untis-btn").addEventListener("click", async () => {
+  await api("/api/untis", { method: "DELETE" });
+  document.getElementById("setting-untis-username").value = "";
+  document.getElementById("setting-untis-password").value = "";
+  document.getElementById("untis-status").textContent = "WebUntis wurde getrennt.";
+  await loadAll();
 });
 
 function renderTimeChips() {
@@ -661,6 +709,8 @@ document.getElementById("auth-submit").addEventListener("click", async () => {
     if (document.getElementById("untis-toggle").classList.contains("on")) {
       body.untis_username = document.getElementById("auth-untis-username").value.trim();
       body.untis_password = document.getElementById("auth-untis-password").value;
+      body.untis_server = document.getElementById("auth-untis-server").value.trim();
+      body.untis_school = document.getElementById("auth-untis-school").value.trim();
     }
   }
 
