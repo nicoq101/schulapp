@@ -273,6 +273,9 @@ DEFAULT_SETTINGS = {
     "notenskala": "unterstufe",
     "untis_server": UNTIS_SERVER,
     "untis_school": UNTIS_SCHOOL,
+    "untis_student_firstname": "",
+    "untis_student_surname": "",
+    "untis_student_id": "",
 }
 
 
@@ -396,6 +399,128 @@ def _find_configured_klasse(session_, user, attempts):
     return None
 
 
+def _student_raw_value(student, *keys):
+    data = getattr(student, "_data", {}) or {}
+    for key in keys:
+        value = getattr(student, key, None)
+        if value not in (None, ""):
+            return value
+        if isinstance(data, dict) and data.get(key) not in (None, ""):
+            return data.get(key)
+    return None
+
+
+def _find_configured_student(session_, user, attempts):
+    """Findet die echte Schüler-ID unabhängig von der Login-Person.
+
+    Das ist vor allem für Eltern-/Erziehungsberechtigtenkonten wichtig: deren
+    Login-Person hat selbst keinen Stundenplan. Auch bei WebUntis-Konten mit
+    ungewöhnlichem personType kann so die reale Schüler-ID verwendet werden.
+    """
+    uid = user["id"]
+    saved_id = (get_setting(uid, "untis_student_id", "") or "").strip()
+    first = (get_setting(uid, "untis_student_firstname", "") or "").strip()
+    surname = (get_setting(uid, "untis_student_surname", "") or "").strip()
+
+    if saved_id:
+        try:
+            sid = int(saved_id)
+            attempts.append({
+                "source": f"gespeicherte Schüler-ID {sid}",
+                "count": 0,
+                "ok": True,
+                "note": "ID vorhanden",
+            })
+            return sid, f"{first} {surname}".strip() or f"Schüler-ID {sid}"
+        except ValueError:
+            set_setting(uid, "untis_student_id", "")
+
+    if not first or not surname:
+        attempts.append({
+            "source": "Schüler-Zuordnung",
+            "count": 0,
+            "ok": False,
+            "error": "Vorname und Nachname des Schülers sind noch nicht eingetragen.",
+        })
+        return None, None
+
+    # Schnellster und datensparsamster Weg: WebUntis getPersonId.
+    try:
+        student = session_.get_student(surname=surname, fore_name=first)
+        sid = int(student)
+        set_setting(uid, "untis_student_id", str(sid))
+        attempts.append({
+            "source": f"Schüler suchen: {first} {surname}",
+            "count": 1,
+            "ok": True,
+            "note": f"ID {sid}",
+        })
+        return sid, f"{first} {surname}"
+    except Exception as e:
+        attempts.append({
+            "source": f"Schüler suchen: {first} {surname}",
+            "count": 0,
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        })
+
+    # Fallback: getStudents, aber nur serverseitig filtern. Die komplette
+    # Schülerliste wird niemals an den Browser geschickt.
+    try:
+        students = session_.students()
+        wanted_first = _normalize_klasse_name(first)
+        wanted_surname = _normalize_klasse_name(surname)
+        matches = []
+        for st in students:
+            st_first = _student_raw_value(st, "fore_name", "foreName") or ""
+            st_surname = _student_raw_value(st, "name", "long_name", "longName") or ""
+            if (
+                _normalize_klasse_name(str(st_first)) == wanted_first
+                and _normalize_klasse_name(str(st_surname)) == wanted_surname
+            ):
+                try:
+                    matches.append(int(st))
+                except Exception:
+                    sid = _student_raw_value(st, "id")
+                    if sid is not None:
+                        matches.append(int(sid))
+
+        matches = sorted(set(matches))
+        if len(matches) == 1:
+            sid = matches[0]
+            set_setting(uid, "untis_student_id", str(sid))
+            attempts.append({
+                "source": f"Schülerliste: {first} {surname}",
+                "count": 1,
+                "ok": True,
+                "note": f"ID {sid}",
+            })
+            return sid, f"{first} {surname}"
+        if len(matches) > 1:
+            attempts.append({
+                "source": f"Schülerliste: {first} {surname}",
+                "count": len(matches),
+                "ok": False,
+                "error": "Mehrere Schüler mit exakt diesem Namen gefunden.",
+            })
+        else:
+            attempts.append({
+                "source": f"Schülerliste: {first} {surname}",
+                "count": 0,
+                "ok": False,
+                "error": "Kein Schüler mit exakt diesem Namen gefunden.",
+            })
+    except Exception as e:
+        attempts.append({
+            "source": "Schülerliste",
+            "count": 0,
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        })
+
+    return None, None
+
+
 def _fetch_timetable_auto(session_, user, start, end):
     """Probiert mehrere WebUntis-Wege, statt Fehler als leeren Plan zu verschlucken.
 
@@ -420,8 +545,33 @@ def _fetch_timetable_auto(session_, user, start, end):
     if table is not None:
         return table, source, attempts
 
-    # 2) WICHTIGER FIX: Person explizit als Schüler (Elementtyp 5) abfragen.
-    # Das umgeht ungültige personType-Werte wie 12.
+    # 2) Echte Schüler-ID verwenden. Das ist der entscheidende Weg für
+    # Elternkonten und Konten, deren Login-personType keinen eigenen Plan hat.
+    configured_student_id, configured_student_name = _find_configured_student(
+        session_, user, attempts
+    )
+    if configured_student_id:
+        table, source = _safe_attempt(
+            attempts,
+            f"Schüler {configured_student_name} / ID {configured_student_id} (extended)",
+            lambda: session_.timetable_extended(
+                student=int(configured_student_id), start=start, end=end
+            ),
+        )
+        if table is not None:
+            return table, source, attempts
+
+        table, source = _safe_attempt(
+            attempts,
+            f"Schüler {configured_student_name} / ID {configured_student_id} (basic)",
+            lambda: session_.timetable(
+                student=int(configured_student_id), start=start, end=end
+            ),
+        )
+        if table is not None:
+            return table, source, attempts
+
+    # 3) Login-Person testweise explizit als Schüler abfragen.
     if person_id:
         table, source = _safe_attempt(
             attempts,
@@ -439,7 +589,7 @@ def _fetch_timetable_auto(session_, user, start, end):
         if table is not None:
             return table, source, attempts
 
-    # 3) Falls der Login eine Klasse liefert, diese direkt verwenden.
+    # 4) Falls der Login eine Klasse liefert, diese direkt verwenden.
     if klasse_id not in (None, "", 0, "0"):
         table, source = _safe_attempt(
             attempts,
@@ -457,7 +607,7 @@ def _fetch_timetable_auto(session_, user, start, end):
         if table is not None:
             return table, source, attempts
 
-    # 4) Manuell in der Schulapp eingetragene Klasse.
+    # 5) Manuell in der Schulapp eingetragene Klasse.
     klasse = _find_configured_klasse(session_, user, attempts)
     if klasse is not None:
         table, source = _safe_attempt(
@@ -476,7 +626,7 @@ def _fetch_timetable_auto(session_, user, start, end):
         if table is not None:
             return table, source, attempts
 
-    # 5) Wenn es offensichtlich ein Lehrer-Konto ist, auch Lehrer explizit testen.
+    # 6) Wenn es offensichtlich ein Lehrer-Konto ist, auch Lehrer explizit testen.
     if person_id and person_type == 2:
         table, source = _safe_attempt(
             attempts,
@@ -1145,6 +1295,9 @@ def api_untis():
             "username": user.get("untis_username") or "",
             "server": get_setting(uid, "untis_server", UNTIS_SERVER),
             "school": get_setting(uid, "untis_school", UNTIS_SCHOOL),
+            "student_firstname": get_setting(uid, "untis_student_firstname", ""),
+            "student_surname": get_setting(uid, "untis_student_surname", ""),
+            "student_id": get_setting(uid, "untis_student_id", ""),
         })
 
     if request.method == "DELETE":
@@ -1159,9 +1312,21 @@ def api_untis():
     untis_password = data.get("password", "")
     untis_server = data.get("server", UNTIS_SERVER).strip() or UNTIS_SERVER
     untis_school = data.get("school", UNTIS_SCHOOL).strip() or UNTIS_SCHOOL
+    student_firstname = data.get("student_firstname", "").strip()
+    student_surname = data.get("student_surname", "").strip()
 
-    if not untis_username or not untis_password:
-        return jsonify({"ok": False, "error": "Bitte WebUntis-Benutzername und Passwort ausfüllen."}), 400
+    if not untis_username:
+        return jsonify({"ok": False, "error": "Bitte WebUntis-Benutzername ausfüllen."}), 400
+
+    # Beim Ändern von Schülername/Server/Schule muss das Passwort nicht erneut
+    # eingegeben werden, wenn bereits ein WebUntis-Konto verbunden ist.
+    if not untis_password and user.get("untis_password_enc"):
+        try:
+            untis_password = decrypt_untis_password(user["untis_password_enc"])
+        except Exception:
+            untis_password = ""
+    if not untis_password:
+        return jsonify({"ok": False, "error": "Bitte WebUntis-Passwort ausfüllen."}), 400
 
     ok, err = try_untis_login(untis_username, untis_password, untis_server, untis_school)
     if not ok:
@@ -1183,8 +1348,14 @@ def api_untis():
     )
     conn.commit()
     conn.close()
+    old_first = (get_setting(uid, "untis_student_firstname", "") or "").strip()
+    old_surname = (get_setting(uid, "untis_student_surname", "") or "").strip()
     set_setting(uid, "untis_server", untis_server)
     set_setting(uid, "untis_school", untis_school)
+    set_setting(uid, "untis_student_firstname", student_firstname)
+    set_setting(uid, "untis_student_surname", student_surname)
+    if old_first != student_firstname or old_surname != student_surname:
+        set_setting(uid, "untis_student_id", "")
     return jsonify({"ok": True})
 
 
@@ -1235,7 +1406,7 @@ def api_untis_test():
             "end": end.isoformat(),
             "login": info,
             "attempts": attempts,
-            "error": "Login funktioniert, aber keine der Stundenplan-Strategien liefert Stunden.",
+            "error": "Login funktioniert, aber noch kein passender Schüler-Stundenplan wurde gefunden. Trage unten den exakten Vor- und Nachnamen des Schülers ein und teste erneut.",
         }), 400
     finally:
         try:
