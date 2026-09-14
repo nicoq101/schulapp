@@ -151,6 +151,45 @@ def init_db():
             erstellt TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS absences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            note TEXT,
+            caught_up INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS materials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            fach TEXT NOT NULL,
+            item TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS lesson_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            fach TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS study_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            fach TEXT NOT NULL,
+            title TEXT NOT NULL,
+            date TEXT NOT NULL,
+            minutes INTEGER NOT NULL DEFAULT 25,
+            done INTEGER NOT NULL DEFAULT 0,
+            exam_date TEXT,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS failed_logins (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ip TEXT NOT NULL,
@@ -276,6 +315,10 @@ DEFAULT_SETTINGS = {
     "untis_student_firstname": "",
     "untis_student_surname": "",
     "untis_student_id": "",
+    "dashboard_widgets": json.dumps(["morning", "today", "tasks", "load"]),
+    "assistant_timebox": "25",
+    "notify_packlist": "true",
+    "school_day_end_buffer": "20",
 }
 
 
@@ -973,6 +1016,55 @@ def log_notification(user_id, titel, text, typ):
     conn.close()
 
 
+
+def _tomorrow_pack_items(user):
+    """Ermittelt Materialien für den nächsten Schultag aus Fächern + eigenen Materiallisten."""
+    uid = user["id"]
+    today = dt.date.today()
+    conn = get_db()
+    material_rows = conn.execute(
+        "SELECT fach, item FROM materials WHERE user_id = ? ORDER BY fach, item", (uid,)
+    ).fetchall()
+    conn.close()
+    by_subject = {}
+    for row in material_rows:
+        by_subject.setdefault((row["fach"] or "").strip().lower(), []).append(row["item"])
+
+    for offset in range(1, 6):
+        day = today + dt.timedelta(days=offset)
+        lessons = fetch_timetable_days(user, start=day, end=day)
+        lessons = [x for x in lessons if x.get("code") != "cancelled"]
+        if not lessons:
+            continue
+        subjects = []
+        items = []
+        for lesson in lessons:
+            subject = (lesson.get("subject") or "").strip()
+            if subject and subject not in subjects:
+                subjects.append(subject)
+            low = subject.lower()
+            for item in by_subject.get(low, []):
+                if item not in items:
+                    items.append(item)
+            if any(k in low for k in ("sport", "pe", "bewegung")) and "Sportsachen" not in items:
+                items.append("Sportsachen")
+            if "kunst" in low and "Kunstmaterial" not in items:
+                items.append("Kunstmaterial")
+            if "musik" in low and "Musikmaterial / Instrument" not in items:
+                items.append("Musikmaterial / Instrument")
+        return day, subjects, items
+    return None, [], []
+
+
+def _upcoming_manual_exams(uid):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT fach, text, faellig FROM tasks WHERE user_id = ? AND typ = 'pruefung' "
+        "AND erledigt = 0 AND faellig IS NOT NULL ORDER BY faellig", (uid,)
+    ).fetchall()
+    conn.close()
+    return [{"name": f"{r['fach']}: {r['text']}", "date": r["faellig"], "fach": r["fach"]} for r in rows]
+
 # ==================== Scheduler-Jobs (laufen für ALLE Nutzer) ====================
 
 
@@ -1036,6 +1128,15 @@ def job_reminder():
             anzahl = len(open_tasks)
             title = "📚 Noch 1 Aufgabe offen" if anzahl == 1 else f"📚 Noch {anzahl} Aufgaben offen"
             body = f"Du hast noch {', '.join(faecher)} offen. Willst du jetzt kurz Zeit dafür einplanen?"
+
+        if get_setting(uid, "notify_packlist", "true") == "true" and dt.datetime.now(TZ).hour >= 17:
+            try:
+                pack_day, pack_subjects, pack_items = _tomorrow_pack_items(user)
+                if pack_day and (pack_items or pack_subjects):
+                    extra = pack_items[:5] if pack_items else pack_subjects[:5]
+                    body += f" Für {pack_day.strftime('%A')}: " + ", ".join(extra) + "."
+            except Exception as e:
+                print(f"Packlisten-Erinnerung fehlgeschlagen ({user['username']}): {e}")
 
         send_push(uid, title, body, tag="lernen")
         log_notification(uid, title, body, "lernen")
@@ -1302,7 +1403,7 @@ def admin_delete(user_id):
     if not admin_authorized():
         return jsonify({"error": "unauthorized"}), 403
     conn = get_db()
-    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades"):
+    for t in ("tasks", "settings", "subscriptions", "notifications", "timetable_snapshot", "grades", "absences", "materials", "lesson_notes", "study_sessions"):
         conn.execute(f"DELETE FROM {t} WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
     conn.commit()
@@ -1627,6 +1728,178 @@ def api_notification_read(note_id):
     conn.close()
     return jsonify({"ok": True})
 
+
+
+# ==================== Schulassistent / Organisation ====================
+
+@app.route("/api/absences", methods=["GET", "POST"])
+@login_required
+def api_absences():
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "POST":
+        data = request.get_json() or {}
+        start_date = data.get("start_date") or dt.date.today().isoformat()
+        end_date = data.get("end_date") or start_date
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+        conn.execute(
+            "INSERT INTO absences (user_id, start_date, end_date, note, created_at) VALUES (?, ?, ?, ?, ?)",
+            (uid, start_date, end_date, data.get("note", ""), dt.datetime.now(TZ).isoformat()),
+        )
+        conn.commit()
+    rows = conn.execute(
+        "SELECT * FROM absences WHERE user_id = ? ORDER BY start_date DESC, id DESC", (uid,)
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/absences/<int:item_id>", methods=["PATCH", "DELETE"])
+@login_required
+def api_absence_detail(item_id):
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM absences WHERE id = ? AND user_id = ?", (item_id, uid))
+    else:
+        data = request.get_json() or {}
+        if "caught_up" in data:
+            conn.execute("UPDATE absences SET caught_up = ? WHERE id = ? AND user_id = ?", (int(bool(data["caught_up"])), item_id, uid))
+    conn.commit(); conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/materials", methods=["GET", "POST"])
+@login_required
+def api_materials():
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "POST":
+        data = request.get_json() or {}
+        fach = (data.get("fach") or "").strip()
+        item = (data.get("item") or "").strip()
+        if not fach or not item:
+            conn.close(); return jsonify({"ok": False, "error": "Fach und Material fehlen."}), 400
+        exists = conn.execute("SELECT 1 FROM materials WHERE user_id=? AND lower(fach)=lower(?) AND lower(item)=lower(?)", (uid, fach, item)).fetchone()
+        if not exists:
+            conn.execute("INSERT INTO materials (user_id, fach, item, created_at) VALUES (?, ?, ?, ?)", (uid, fach, item, dt.datetime.now(TZ).isoformat()))
+            conn.commit()
+    rows = conn.execute("SELECT * FROM materials WHERE user_id=? ORDER BY fach, item", (uid,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/materials/<int:item_id>", methods=["DELETE"])
+@login_required
+def api_material_delete(item_id):
+    conn = get_db(); conn.execute("DELETE FROM materials WHERE id=? AND user_id=?", (item_id, session["user_id"])); conn.commit(); conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lesson-notes", methods=["GET", "POST"])
+@login_required
+def api_lesson_notes():
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "POST":
+        data = request.get_json() or {}
+        fach = (data.get("fach") or "").strip(); text = (data.get("text") or "").strip()
+        if not fach or not text:
+            conn.close(); return jsonify({"ok": False, "error": "Fach und Notiz fehlen."}), 400
+        conn.execute(
+            "INSERT INTO lesson_notes (user_id, date, fach, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (uid, data.get("date") or dt.date.today().isoformat(), fach, text, dt.datetime.now(TZ).isoformat()),
+        ); conn.commit()
+    rows = conn.execute("SELECT * FROM lesson_notes WHERE user_id=? ORDER BY date DESC, id DESC LIMIT 300", (uid,)).fetchall(); conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/lesson-notes/<int:item_id>", methods=["DELETE"])
+@login_required
+def api_lesson_note_delete(item_id):
+    conn = get_db(); conn.execute("DELETE FROM lesson_notes WHERE id=? AND user_id=?", (item_id, session["user_id"])); conn.commit(); conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/study-sessions", methods=["GET", "POST"])
+@login_required
+def api_study_sessions():
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "POST":
+        data = request.get_json() or {}
+        conn.execute(
+            "INSERT INTO study_sessions (user_id, fach, title, date, minutes, done, exam_date, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            (uid, (data.get("fach") or "Lernen").strip(), (data.get("title") or "Lerneinheit").strip(), data.get("date") or dt.date.today().isoformat(), max(5, min(180, int(data.get("minutes", 25)))), data.get("exam_date"), dt.datetime.now(TZ).isoformat()),
+        ); conn.commit()
+    rows = conn.execute("SELECT * FROM study_sessions WHERE user_id=? ORDER BY done, date, id", (uid,)).fetchall(); conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/study-sessions/<int:item_id>", methods=["PATCH", "DELETE"])
+@login_required
+def api_study_session_detail(item_id):
+    uid = session["user_id"]
+    conn = get_db()
+    if request.method == "DELETE":
+        conn.execute("DELETE FROM study_sessions WHERE id=? AND user_id=?", (item_id, uid))
+    else:
+        data = request.get_json() or {}
+        if "done" in data:
+            conn.execute("UPDATE study_sessions SET done=? WHERE id=? AND user_id=?", (int(bool(data["done"])), item_id, uid))
+    conn.commit(); conn.close(); return jsonify({"ok": True})
+
+
+@app.route("/api/study-plan/generate", methods=["POST"])
+@login_required
+def api_study_plan_generate():
+    uid = session["user_id"]
+    data = request.get_json() or {}
+    fach = (data.get("fach") or "Lernen").strip()
+    title = (data.get("title") or f"Vorbereitung {fach}").strip()
+    exam_date = dt.date.fromisoformat(data["exam_date"])
+    today = dt.date.today()
+    last_day = exam_date - dt.timedelta(days=1)
+    candidates = []
+    d = today
+    while d <= last_day:
+        if d.weekday() < 6:  # Sonntag möglichst frei lassen
+            candidates.append(d)
+        d += dt.timedelta(days=1)
+    if not candidates:
+        candidates = [today]
+    candidates = candidates[-min(7, len(candidates)):]
+    minutes = max(15, min(90, int(data.get("minutes", 30))))
+    conn = get_db()
+    conn.execute("DELETE FROM study_sessions WHERE user_id=? AND exam_date=? AND lower(fach)=lower(?) AND done=0", (uid, exam_date.isoformat(), fach))
+    for i, day in enumerate(candidates, 1):
+        session_title = title if len(candidates) == 1 else f"{title} · Teil {i}/{len(candidates)}"
+        conn.execute(
+            "INSERT INTO study_sessions (user_id, fach, title, date, minutes, done, exam_date, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            (uid, fach, session_title, day.isoformat(), minutes, exam_date.isoformat(), dt.datetime.now(TZ).isoformat()),
+        )
+    conn.commit(); conn.close()
+    return jsonify({"ok": True, "count": len(candidates)})
+
+
+@app.route("/api/widget")
+@login_required
+def api_widget():
+    """Kompakte Datenbasis für ein späteres Apple-Widget / Homescreen-Widget."""
+    user = current_user(); now = dt.datetime.now(TZ); today = now.date()
+    lessons = fetch_timetable_days(user, start=today, end=today + dt.timedelta(days=3))
+    today_lessons = [x for x in lessons if x.get("date") == today.isoformat() and x.get("code") != "cancelled"]
+    now_hm = now.strftime("%H:%M")
+    current = next((x for x in today_lessons if x.get("start", "") <= now_hm < x.get("end", "")), None)
+    nxt = next((x for x in today_lessons if x.get("start", "") > now_hm), None)
+    conn = get_db()
+    tasks = conn.execute("SELECT * FROM tasks WHERE user_id=? AND erledigt=0 ORDER BY faellig IS NULL, faellig LIMIT 3", (session["user_id"],)).fetchall(); conn.close()
+    exams = fetch_exams(user)
+    return jsonify({
+        "updated_at": now.isoformat(), "current": current, "next": nxt,
+        "tasks": [dict(r) for r in tasks], "next_exam": exams[0] if exams else None,
+    })
 
 # ==================== Noten-Tracker ====================
 
