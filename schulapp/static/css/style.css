@@ -475,3 +475,42 @@ a { color: inherit; }
   margin-bottom: 14px;
 }
 .auth-error.visible { display: block; }
+
+
+/* ---------- Schulapp Smart / Assistent ---------- */
+.smart-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.smart-hero { position:relative; overflow:hidden; }
+.smart-hero::after { content:""; position:absolute; width:130px; height:130px; border-radius:50%; background:var(--accent-soft); right:-60px; top:-65px; pointer-events:none; }
+.smart-kicker { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-muted); font-weight:700; }
+.smart-title { font-family:'Space Grotesk',sans-serif; font-size:20px; font-weight:700; margin-top:5px; }
+.smart-big { font-family:'JetBrains Mono',monospace; font-size:24px; font-weight:700; margin-top:5px; }
+.smart-mini { min-height:104px; }
+.smart-result { margin-top:12px; padding:12px; border-radius:12px; background:var(--surface-2); font-size:13px; line-height:1.45; }
+.sub { color:var(--text-muted); font-size:12px; line-height:1.45; }
+.compact button { padding:7px 6px; }
+select { width:100%; padding:12px 14px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2); color:var(--text); font:inherit; }
+.load-map { display:grid; grid-template-columns:repeat(7,1fr); gap:6px; margin-top:10px; }
+.load-day { min-width:0; text-align:center; background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:9px 3px; }
+.load-day .d { font-size:10px; color:var(--text-muted); }
+.load-day .n { font:600 12px 'JetBrains Mono',monospace; margin:3px 0 7px; }
+.load-bar { height:34px; border-radius:6px; background:var(--surface-2); overflow:hidden; display:flex; align-items:flex-end; }
+.load-bar > i { display:block; width:100%; background:var(--text); opacity:.8; border-radius:5px 5px 0 0; }
+.smart-list-item { padding:12px 0; border-bottom:1px solid var(--border); }
+.smart-list-item:last-child { border-bottom:none; }
+.smart-list-item .title { font-weight:600; font-size:14px; }
+.smart-list-item .meta { color:var(--text-muted); font-size:12px; margin-top:3px; }
+.pack-item { display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid var(--border); }
+.pack-item:last-child { border-bottom:0; }
+.pack-check { width:22px; height:22px; border-radius:7px; border:2px solid var(--text-muted); background:transparent; flex:0 0 auto; color:transparent; }
+.pack-check.done { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+.chip-row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+.smart-chip { display:inline-flex; align-items:center; gap:5px; padding:5px 9px; border-radius:999px; background:var(--surface-2); border:1px solid var(--border); font-size:11px; }
+.subject-card { margin-bottom:10px; cursor:pointer; }
+.subject-top { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+.subject-stat { font:600 14px 'JetBrains Mono',monospace; }
+.alert-card { border-style:dashed; }
+.progress-line { height:6px; background:var(--surface-2); border-radius:999px; overflow:hidden; margin-top:8px; }
+.progress-line > i { display:block; height:100%; background:var(--text); border-radius:999px; }
+.offline-pill { display:none; font-size:10px; padding:4px 7px; border-radius:999px; border:1px solid var(--border); color:var(--text-muted); margin-top:4px; width:max-content; }
+.offline-pill.visible { display:block; }
+@media (max-width:390px) { .tab { font-size:9px; } .tab svg { width:20px; height:20px; } .smart-grid { grid-template-columns:1fr; } }
