@@ -1,4 +1,4 @@
-const CACHE_NAME = "schulapp-v8-gradefix";
+const CACHE_NAME = "schulapp-layout-select-v2";
 const CORE_ASSETS = ["/", "/static/css/style.css", "/static/js/app.js?v=20260915-smart2", "/static/manifest.json"];
 
 self.addEventListener("install", (event) => {

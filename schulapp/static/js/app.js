@@ -156,6 +156,7 @@ async function loadWeekTimetable() {
 
 function renderAll() {
   applyTheme(state.settings.theme || "system");
+  applyLayoutMode(state.settings.layout_mode || "auto");
   renderGreeting();
   renderDashboard();
   renderAufgaben();
@@ -433,6 +434,30 @@ function renderPlan() {
 
 // ==================== Einstellungen ====================
 
+function applyLayoutMode(mode) {
+  const allowed = new Set(["auto", "ipad11", "ipad13"]);
+  const selected = allowed.has(mode) ? mode : "auto";
+
+  if (selected === "auto") {
+    document.documentElement.removeAttribute("data-device-layout");
+  } else {
+    document.documentElement.setAttribute("data-device-layout", selected);
+  }
+
+  document.querySelectorAll("#layout-segmented button").forEach((b) => {
+    b.classList.toggle("active", b.dataset.layout === selected);
+  });
+
+  const hint = document.getElementById("layout-hint");
+  if (hint) {
+    hint.textContent = selected === "ipad11"
+      ? '11"-Layout: etwas kompakter, mehr Platz pro Inhalt.'
+      : selected === "ipad13"
+        ? '13"-Layout: größere Abstände und mehrspaltige Ansichten.'
+        : "Automatisch passt sich an die Bildschirmgröße an.";
+  }
+}
+
 function applyTheme(theme) {
   if (theme === "system") {
     document.documentElement.removeAttribute("data-theme");
@@ -451,6 +476,17 @@ document.getElementById("theme-segmented").addEventListener("click", async (e) =
   applyTheme(theme);
   state.settings.theme = theme;
   await api("/api/settings", { method: "POST", body: JSON.stringify({ theme }) });
+});
+
+
+document.getElementById("layout-segmented").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  haptic(6);
+  const layout_mode = btn.dataset.layout;
+  applyLayoutMode(layout_mode);
+  state.settings.layout_mode = layout_mode;
+  await api("/api/settings", { method: "POST", body: JSON.stringify({ layout_mode }) });
 });
 
 document.getElementById("notenskala-segmented").addEventListener("click", async (e) => {
@@ -480,6 +516,7 @@ function applyNotenskala(skala) {
 
 function renderEinstellungen() {
   applyNotenskala(state.settings.notenskala || "unterstufe");
+  applyLayoutMode(state.settings.layout_mode || "auto");
   document.querySelectorAll(".switch[data-setting]").forEach((sw) => {
     const key = sw.dataset.setting;
     sw.classList.toggle("on", state.settings[key] === "true" || state.settings[key] === true);
