@@ -94,6 +94,19 @@
       <div class="tile"><div class="value mono" id="tile-exam">–</div><div class="label">Nächste Klausur</div></div>
     </div>
 
+    <div id="dashboard-morning-wrap">
+      <div class="section-title">Dein Schulmorgen</div>
+      <div class="card smart-hero" id="morning-brief"><div class="empty-state">Wird vorbereitet …</div></div>
+    </div>
+
+    <div id="dashboard-load-wrap">
+      <div class="section-title">Heute im Blick</div>
+      <div class="smart-grid">
+        <div class="card smart-mini"><div class="smart-kicker">Belastung</div><div class="smart-big" id="today-load-score">–</div><div class="sub" id="today-load-label">–</div></div>
+        <div class="card smart-mini"><div class="smart-kicker">Schulschluss</div><div class="smart-big" id="school-end-countdown">–</div><div class="sub">inkl. letzter Stunde</div></div>
+      </div>
+    </div>
+
     <div class="section-title">Heutiger Plan</div>
     <div class="rail" id="dashboard-rail"><div class="empty-state"><div class="display">Lädt …</div></div></div>
 
@@ -121,6 +134,18 @@
     </div>
     <div class="section-title">Nach Fach</div>
     <div id="grades-by-subject"></div>
+    <div class="section-title">Noten-Simulator</div>
+    <div class="card">
+      <div class="field"><label>Fach</label><select id="grade-calc-subject"></select></div>
+      <div class="smart-grid">
+        <div class="field"><label>Nächste Note / NP</label><input type="number" id="grade-calc-next" step="0.5" /></div>
+        <div class="field"><label>Gewichtung</label><input type="number" id="grade-calc-weight" value="1" step="0.5" min="0.5" /></div>
+      </div>
+      <div class="field"><label>Ziel-Schnitt (optional)</label><input type="number" id="grade-calc-target" step="0.1" placeholder="z.B. 2.0" /></div>
+      <button class="btn-primary" id="grade-calc-btn">Berechnen</button>
+      <div class="smart-result" id="grade-calc-result">Wähle ein Fach und simuliere deine nächste Note.</div>
+    </div>
+
     <div class="section-title">Alle Noten</div>
     <div class="card" id="grades-list"></div>
   </section>
@@ -148,6 +173,61 @@
 
     <div class="section-title">Klausuren</div>
     <div class="card" id="exam-list"></div>
+  </section>
+
+  <!-- ===================== ASSISTENT ===================== -->
+  <section class="screen" id="screen-assistent">
+    <div class="section-title">Was jetzt?</div>
+    <div class="card smart-hero">
+      <div class="smart-kicker">Nächster sinnvoller Schritt</div>
+      <div class="smart-title" id="next-action-title">Wird berechnet …</div>
+      <div class="sub" id="next-action-sub"></div>
+      <div class="segmented compact" id="timebox-segmented" style="margin-top:12px;">
+        <button data-minutes="10">10 Min.</button><button data-minutes="25" class="active">25 Min.</button><button data-minutes="45">45 Min.</button>
+      </div>
+      <button class="btn-primary" id="next-action-done" style="margin-top:10px; display:none;">Erledigt</button>
+    </div>
+
+    <div class="section-title">Morgen packen</div>
+    <div class="card" id="packlist-card"><div class="empty-state">Lädt …</div></div>
+
+    <div class="section-title">Konflikte & Stresskarte</div>
+    <div class="card" id="conflict-card"></div>
+    <div class="load-map" id="load-map"></div>
+
+    <div class="section-title">Freistunden</div>
+    <div class="card" id="free-periods-card"></div>
+
+    <div class="section-title">Mein Nachmittag</div>
+    <div class="card" id="day-plan-card"></div>
+
+    <div class="section-title">Prüfungs-Vorbereitung</div>
+    <div id="study-planner-exams"></div>
+    <div class="card" id="study-sessions-card"></div>
+
+    <div class="section-title">Fehlstunden-Aufholmodus</div>
+    <div class="card"> 
+      <div class="smart-grid">
+        <div class="field"><label>Von</label><input type="date" id="absence-start" /></div>
+        <div class="field"><label>Bis</label><input type="date" id="absence-end" /></div>
+      </div>
+      <div class="field"><label>Notiz (optional)</label><input type="text" id="absence-note" placeholder="z.B. krank" /></div>
+      <button class="btn-primary" id="add-absence-btn">Fehlzeit hinzufügen</button>
+    </div>
+    <div id="absence-list"></div>
+
+    <div class="section-title">Was haben wir gemacht?</div>
+    <div class="card">
+      <div class="smart-grid">
+        <div class="field"><label>Fach</label><input type="text" id="lesson-note-subject" placeholder="z.B. Mathe" /></div>
+        <div class="field"><label>Datum</label><input type="date" id="lesson-note-date" /></div>
+      </div>
+      <div class="field"><label>Kurznotiz</label><input type="text" id="lesson-note-text" placeholder="z.B. Quadratische Funktionen angefangen" /></div>
+      <button class="btn-primary" id="add-lesson-note-btn">Unterrichtsnotiz speichern</button>
+    </div>
+
+    <div class="section-title">Fächer</div>
+    <div id="subject-cards"></div>
   </section>
 
   <!-- ===================== EINSTELLUNGEN ===================== -->
@@ -215,6 +295,14 @@
       <button class="btn-primary" id="disconnect-untis-btn" style="margin-top:8px;">WebUntis trennen</button>
     </div>
 
+    <div class="section-title">Smart-Funktionen</div>
+    <div class="card">
+      <div class="settings-row"><div><div class="label">Packlisten-Erinnerungen</div><div class="sub">Abends Materialien für den nächsten Schultag mitdenken</div></div><button class="switch" data-setting="notify_packlist"></button></div>
+      <div class="settings-row"><div><div class="label">Schulmorgen anzeigen</div><div class="sub">Persönliche Zusammenfassung auf dem Dashboard</div></div><button class="switch dashboard-widget-switch" data-widget="morning"></button></div>
+      <div class="settings-row"><div><div class="label">Belastung anzeigen</div><div class="sub">Tagesbelastung und Schulschluss</div></div><button class="switch dashboard-widget-switch" data-widget="load"></button></div>
+      <div class="settings-row"><div><div class="label">Fällige Aufgaben anzeigen</div><div class="sub">Bald-fällig-Karte auf dem Dashboard</div></div><button class="switch dashboard-widget-switch" data-widget="tasks"></button></div>
+    </div>
+
     <div class="section-title">Personalisierung</div>
     <div class="card">
       <div class="field"><label>Name</label><input type="text" id="setting-name" placeholder="Dein Name" /></div>
@@ -227,6 +315,14 @@
   <div class="sheet" id="notif-sheet" style="max-height: 75vh; overflow-y: auto;">
     <h3>Benachrichtigungen</h3>
     <div id="notif-list"></div>
+  </div>
+
+  <div class="sheet-backdrop" id="subject-backdrop"></div>
+  <div class="sheet" id="subject-sheet" style="max-height:82vh; overflow-y:auto;">
+    <h3 id="subject-sheet-title">Fach</h3>
+    <div id="subject-sheet-body"></div>
+    <div class="field"><label>Material hinzufügen</label><input type="text" id="subject-material-input" placeholder="z.B. Taschenrechner" /></div>
+    <button class="btn-primary" id="subject-material-add">Material speichern</button>
   </div>
 
   <div class="sheet-backdrop" id="add-backdrop"></div>
@@ -265,6 +361,10 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
       Plan
     </button>
+    <button class="tab" data-screen="assistent">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="5"/><path d="M8.5 8.5 6.4 6.4M17.6 17.6l-2.1-2.1M15.5 8.5l2.1-2.1M6.4 17.6l2.1-2.1"/></svg>
+      Assistent
+    </button>
     <button class="tab" data-screen="einstellungen">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       Einstellungen
@@ -273,6 +373,6 @@
 
 </div>
 
-<script src="/static/js/app.js?v=20260913-7"></script>
+<script src="/static/js/app.js?v=20260915-smart1"></script>
 </body>
 </html>
