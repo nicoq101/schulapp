@@ -514,3 +514,470 @@ select { width:100%; padding:12px 14px; border-radius:12px; border:1px solid var
 .offline-pill { display:none; font-size:10px; padding:4px 7px; border-radius:999px; border:1px solid var(--border); color:var(--text-muted); margin-top:4px; width:max-content; }
 .offline-pill.visible { display:block; }
 @media (max-width:390px) { .tab { font-size:9px; } .tab svg { width:20px; height:20px; } .smart-grid { grid-template-columns:1fr; } }
+
+
+/* ==========================================================
+   iPad Pro 11" / 13" Optimierung
+   - Portrait: breiteres Tablet-Layout
+   - Landscape: Seiten-Navigation + mehr Spalten
+   ========================================================== */
+
+@media (min-width: 768px) {
+  html, body {
+    min-height: 100%;
+  }
+
+  body {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  #app {
+    max-width: 1120px;
+    width: 100%;
+    padding-bottom: 118px;
+  }
+
+  .topbar {
+    padding: calc(28px + env(safe-area-inset-top)) 32px 12px;
+  }
+
+  .topbar .greeting { font-size: 14px; }
+  .topbar h1 { font-size: 30px; }
+
+  .screen {
+    padding: 8px 32px 38px;
+  }
+
+  .section-title {
+    margin-top: 32px;
+    font-size: 12px;
+  }
+
+  .card {
+    padding: 20px;
+  }
+
+  .tile-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .tile {
+    min-height: 108px;
+    padding: 18px;
+  }
+
+  .tile .value {
+    font-size: 29px;
+  }
+
+  .smart-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .smart-mini {
+    min-height: 120px;
+  }
+
+  .smart-title {
+    font-size: 22px;
+  }
+
+  .rail {
+    padding-left: 32px;
+  }
+
+  .rail-item {
+    padding: 13px 16px;
+  }
+
+  .rail-time,
+  .rail-meta {
+    font-size: 13px;
+  }
+
+  .rail-subject {
+    font-size: 16px;
+  }
+
+  #week-container {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    align-items: start;
+  }
+
+  #week-container .day-block {
+    margin-bottom: 0;
+    min-width: 0;
+  }
+
+  #grades-by-subject {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  #grades-by-subject > * {
+    min-width: 0;
+  }
+
+  .load-map {
+    gap: 8px;
+  }
+
+  .load-day {
+    padding: 11px 5px;
+  }
+
+  .tabbar {
+    max-width: none;
+    width: auto;
+    left: 24px;
+    right: 24px;
+    bottom: calc(14px + env(safe-area-inset-bottom));
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 22px;
+    padding: 9px 14px;
+    box-shadow: var(--shadow);
+  }
+
+  .tab {
+    font-size: 11px;
+    padding: 9px 4px;
+  }
+
+  .tab svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .fab {
+    right: 34px;
+    bottom: calc(112px + env(safe-area-inset-bottom));
+    width: 60px;
+    height: 60px;
+  }
+
+  .sheet {
+    left: 50%;
+    right: auto;
+    width: min(640px, calc(100vw - 56px));
+    max-width: 640px;
+    transform: translateX(-50%);
+    border-radius: 24px;
+    padding: 26px 26px 30px;
+  }
+
+  .sheet.open {
+    bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+
+  .auth-box {
+    max-width: 460px;
+    padding: 34px 30px;
+  }
+
+  .auth-box h1 {
+    font-size: 32px;
+  }
+
+  .field input,
+  .field select,
+  select {
+    font-size: 16px;
+    min-height: 48px;
+  }
+
+  .btn-primary {
+    min-height: 48px;
+    font-size: 16px;
+  }
+
+  .settings-row {
+    min-height: 58px;
+  }
+}
+
+/* iPad Pro 11" / 13" im Querformat */
+@media (min-width: 1100px) and (orientation: landscape) {
+  #app {
+    max-width: none;
+    width: 100%;
+    padding-left: 116px;
+    padding-bottom: 24px;
+  }
+
+  .topbar,
+  .screen {
+    width: min(1180px, calc(100vw - 156px));
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .topbar {
+    padding-left: 36px;
+    padding-right: 36px;
+  }
+
+  .screen {
+    padding-left: 36px;
+    padding-right: 36px;
+  }
+
+  .tabbar {
+    top: calc(20px + env(safe-area-inset-top));
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    left: calc(18px + env(safe-area-inset-left));
+    right: auto;
+    width: 88px;
+    height: auto;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    padding: 14px 8px;
+    border-radius: 24px;
+  }
+
+  .tab {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 12px 2px;
+    font-size: 10px;
+    border-radius: 14px;
+  }
+
+  .tab.active {
+    background: var(--accent-soft);
+  }
+
+  .tab svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .fab {
+    right: calc(34px + env(safe-area-inset-right));
+    bottom: calc(30px + env(safe-area-inset-bottom));
+  }
+
+  .tile-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .smart-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  #week-container {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #grades-by-subject {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .sheet {
+    width: min(700px, calc(100vw - 180px));
+    max-width: 700px;
+  }
+}
+
+/* Extra Luft auf dem großen iPad Pro 13" */
+@media (min-width: 1000px) and (orientation: portrait) {
+  #app {
+    max-width: 980px;
+  }
+
+  .topbar,
+  .screen {
+    padding-left: 38px;
+    padding-right: 38px;
+  }
+
+  .smart-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #week-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+
+/* ==========================================================
+   Manuell auswählbares iPad-Layout
+   Settings -> iPad-Layout: Automatisch / 11" / 13"
+   ========================================================== */
+
+#layout-segmented {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* 11" bewusst kompakter */
+html[data-device-layout="ipad11"] #app {
+  max-width: 900px;
+}
+
+html[data-device-layout="ipad11"] .topbar,
+html[data-device-layout="ipad11"] .screen {
+  padding-left: 28px;
+  padding-right: 28px;
+}
+
+html[data-device-layout="ipad11"] .tile-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+html[data-device-layout="ipad11"] .smart-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+html[data-device-layout="ipad11"] #week-container,
+html[data-device-layout="ipad11"] #grades-by-subject {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+html[data-device-layout="ipad11"] .tile {
+  min-height: 100px;
+  padding: 16px;
+}
+
+/* 13" nutzt die große Fläche stärker */
+html[data-device-layout="ipad13"] #app {
+  max-width: 1080px;
+}
+
+html[data-device-layout="ipad13"] .topbar,
+html[data-device-layout="ipad13"] .screen {
+  padding-left: 42px;
+  padding-right: 42px;
+}
+
+html[data-device-layout="ipad13"] .tile-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+html[data-device-layout="ipad13"] .smart-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+html[data-device-layout="ipad13"] #week-container,
+html[data-device-layout="ipad13"] #grades-by-subject {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+html[data-device-layout="ipad13"] .tile {
+  min-height: 116px;
+  padding: 20px;
+}
+
+html[data-device-layout="ipad13"] .card {
+  padding: 22px;
+}
+
+/* Querformat: manuelle Wahl bleibt erhalten, Navigation bleibt seitlich. */
+@media (min-width: 900px) and (orientation: landscape) {
+  html[data-device-layout="ipad11"] #app,
+  html[data-device-layout="ipad13"] #app {
+    max-width: none;
+    width: 100%;
+    padding-left: 116px;
+    padding-bottom: 24px;
+  }
+
+  html[data-device-layout="ipad11"] .topbar,
+  html[data-device-layout="ipad11"] .screen,
+  html[data-device-layout="ipad13"] .topbar,
+  html[data-device-layout="ipad13"] .screen {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  html[data-device-layout="ipad11"] .topbar,
+  html[data-device-layout="ipad11"] .screen {
+    width: min(980px, calc(100vw - 156px));
+  }
+
+  html[data-device-layout="ipad13"] .topbar,
+  html[data-device-layout="ipad13"] .screen {
+    width: min(1240px, calc(100vw - 156px));
+  }
+
+  html[data-device-layout="ipad11"] .tabbar,
+  html[data-device-layout="ipad13"] .tabbar {
+    top: calc(20px + env(safe-area-inset-top));
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    left: calc(18px + env(safe-area-inset-left));
+    right: auto;
+    width: 88px;
+    height: auto;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    padding: 14px 8px;
+    border-radius: 24px;
+  }
+
+  html[data-device-layout="ipad11"] .tab,
+  html[data-device-layout="ipad13"] .tab {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 12px 2px;
+    border-radius: 14px;
+  }
+
+  html[data-device-layout="ipad11"] .fab,
+  html[data-device-layout="ipad13"] .fab {
+    right: calc(34px + env(safe-area-inset-right));
+    bottom: calc(30px + env(safe-area-inset-bottom));
+  }
+
+  html[data-device-layout="ipad11"] .smart-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  html[data-device-layout="ipad13"] .smart-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+/* Auf sehr schmalen Fenstern bleibt alles bedienbar, auch bei manueller Wahl. */
+@media (max-width: 767px) {
+  html[data-device-layout="ipad11"] #app,
+  html[data-device-layout="ipad13"] #app {
+    max-width: 560px;
+  }
+
+  html[data-device-layout="ipad11"] .topbar,
+  html[data-device-layout="ipad11"] .screen,
+  html[data-device-layout="ipad13"] .topbar,
+  html[data-device-layout="ipad13"] .screen {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+
+  html[data-device-layout="ipad11"] .tile-grid,
+  html[data-device-layout="ipad13"] .tile-grid,
+  html[data-device-layout="ipad11"] .smart-grid,
+  html[data-device-layout="ipad13"] .smart-grid,
+  html[data-device-layout="ipad11"] #week-container,
+  html[data-device-layout="ipad13"] #week-container,
+  html[data-device-layout="ipad11"] #grades-by-subject,
+  html[data-device-layout="ipad13"] #grades-by-subject {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
