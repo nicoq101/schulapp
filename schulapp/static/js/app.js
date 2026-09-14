@@ -925,11 +925,68 @@ document.getElementById("subject-backdrop")?.addEventListener("click",closeSubje
 document.getElementById("subject-material-add")?.addEventListener("click",async()=>{const item=document.getElementById("subject-material-input").value.trim();if(!item||!activeSubject)return;await api("/api/materials",{method:"POST",body:JSON.stringify({fach:activeSubject,item})});document.getElementById("subject-material-input").value="";await loadAll();openSubject(activeSubject);});
 
 function renderGradeCalculatorOptions() {
-  const sel=document.getElementById("grade-calc-subject");if(!sel)return;const current=sel.value;const subjects=[...new Set(state.grades.map((g)=>g.fach))].sort();sel.innerHTML=`<option value="">Fach wählen</option>`+subjects.map((s)=>`<option ${s===current?"selected":""}>${escapeHtml(s)}</option>`).join("");
-  const skala=state.settings.notenskala||"unterstufe";const next=document.getElementById("grade-calc-next");if(next){next.min=skala==="oberstufe"?0:1;next.max=skala==="oberstufe"?15:6;next.step=skala==="oberstufe"?1:.5;}
+  const sel = document.getElementById("grade-calc-subject");
+  if (!sel) return;
+
+  // Nicht nur Fächer verwenden, in denen bereits eine Note eingetragen ist.
+  // So kann man direkt alle aus WebUntis/Aufgaben/Fachseiten erkannten Fächer wählen.
+  const current = sel.value;
+  const subjects = uniqueSubjects();
+  sel.innerHTML = `<option value="">Fach wählen</option>` + subjects
+    .map((s) => `<option value="${escapeHtml(s)}" ${s === current ? "selected" : ""}>${escapeHtml(s)}</option>`)
+    .join("");
+
+  // Falls das vorher gewählte Fach nach einem Refresh weiterhin existiert, Auswahl behalten.
+  if (current && subjects.includes(current)) sel.value = current;
+
+  const skala = state.settings.notenskala || "unterstufe";
+  const next = document.getElementById("grade-calc-next");
+  if (next) {
+    next.min = skala === "oberstufe" ? 0 : 1;
+    next.max = skala === "oberstufe" ? 15 : 6;
+    next.step = skala === "oberstufe" ? 1 : .5;
+  }
 }
 
-document.getElementById("grade-calc-btn")?.addEventListener("click",()=>{const fach=document.getElementById("grade-calc-subject").value;const next=Number(document.getElementById("grade-calc-next").value),weight=Number(document.getElementById("grade-calc-weight").value||1),target=Number(document.getElementById("grade-calc-target").value);const out=document.getElementById("grade-calc-result");const grades=state.grades.filter((g)=>g.fach===fach);if(!fach||!grades.length||Number.isNaN(next)){out.textContent="Bitte Fach und nächste Note eintragen.";return;}const sum=grades.reduce((s,g)=>s+g.note*g.gewichtung,0),w=grades.reduce((s,g)=>s+g.gewichtung,0),after=(sum+next*weight)/(w+weight);let text=`Neuer Schnitt: ${after.toFixed(2)} (vorher ${(sum/w).toFixed(2)}).`;if(target){const needed=(target*(w+weight)-sum)/weight;const skala=state.settings.notenskala||"unterstufe";if(skala==="oberstufe") text+=` Für Ø ${target} wären rechnerisch ${needed.toFixed(1)} NP nötig.`;else text+=` Für Ø ${target} wäre rechnerisch Note ${needed.toFixed(2)} nötig.`;}out.textContent=text;});
+document.getElementById("grade-calc-btn")?.addEventListener("click", () => {
+  const fach = document.getElementById("grade-calc-subject").value;
+  const next = Number(document.getElementById("grade-calc-next").value);
+  const weight = Number(document.getElementById("grade-calc-weight").value || 1);
+  const targetRaw = document.getElementById("grade-calc-target").value.trim();
+  const target = targetRaw === "" ? null : Number(targetRaw);
+  const out = document.getElementById("grade-calc-result");
+
+  if (!fach) {
+    out.textContent = "Bitte zuerst ein Fach auswählen.";
+    return;
+  }
+  if (Number.isNaN(next)) {
+    out.textContent = "Bitte die nächste Note / NP eintragen.";
+    return;
+  }
+
+  const grades = state.grades.filter((g) =>
+    (g.fach || "").trim().toLowerCase() === fach.trim().toLowerCase()
+  );
+  if (!grades.length) {
+    out.textContent = `Für ${fach} ist noch keine bestehende Note gespeichert. Füge zuerst mindestens eine Note hinzu, damit ein neuer Schnitt berechnet werden kann.`;
+    return;
+  }
+
+  const sum = grades.reduce((s, g) => s + g.note * g.gewichtung, 0);
+  const w = grades.reduce((s, g) => s + g.gewichtung, 0);
+  const after = (sum + next * weight) / (w + weight);
+  const decimals = (state.settings.notenskala || "unterstufe") === "oberstufe" ? 1 : 2;
+  let text = `Neuer Schnitt in ${fach}: ${after.toFixed(decimals)} (vorher ${(sum / w).toFixed(decimals)}).`;
+
+  if (target !== null && !Number.isNaN(target)) {
+    const needed = (target * (w + weight) - sum) / weight;
+    const skala = state.settings.notenskala || "unterstufe";
+    if (skala === "oberstufe") text += ` Für Ø ${target} wären rechnerisch ${needed.toFixed(1)} NP nötig.`;
+    else text += ` Für Ø ${target} wäre rechnerisch Note ${needed.toFixed(2)} nötig.`;
+  }
+  out.textContent = text;
+});
 
 function renderNotificationPriority() {
   // Vorhandenes Notification-Center bleibt die Quelle; Smart-Ansicht priorisiert nur visuell.
