@@ -308,6 +308,7 @@ DEFAULT_SETTINGS = {
     "notify_pruefungen": "true",
     "reminder_times": json.dumps(["17:30", "19:00", "21:30"]),
     "theme": "system",
+    "layout_mode": "auto",
     "klasse": "",
     "notenskala": "unterstufe",
     "untis_server": UNTIS_SERVER,
