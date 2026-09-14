@@ -8,6 +8,10 @@ let state = {
   settings: {},
   notifications: [],
   grades: [],
+  absences: [],
+  materials: [],
+  lessonNotes: [],
+  studySessions: [],
 };
 
 let planMode = "tage"; // "tage" oder "woche"
@@ -70,19 +74,47 @@ function mondayForPlan() {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    cache: "no-store",
-    ...options,
-  });
-  const contentType = res.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) {
-    const text = await res.text();
-    return { ok: false, error: `Serverfehler ${res.status}: ${text.slice(0, 180)}` };
+  const method = (options.method || "GET").toUpperCase();
+  const cacheKey = `schulapp-api:${path}`;
+  try {
+    const res = await fetch(path, {
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      cache: "no-store",
+      ...options,
+    });
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      const text = await res.text();
+      return { ok: false, error: `Serverfehler ${res.status}: ${text.slice(0, 180)}` };
+    }
+    const data = await res.json();
+    if (method === "GET" && res.ok) {
+      try { localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data })); } catch (_) {}
+      setOfflineState(false);
+    }
+    return data;
+  } catch (err) {
+    if (method === "GET") {
+      try {
+        const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
+        if (cached) { setOfflineState(true, cached.ts); return cached.data; }
+      } catch (_) {}
+    }
+    return { ok: false, error: "Keine Verbindung zum Server." };
   }
-  return res.json();
 }
+
+function setOfflineState(isOffline, ts = null) {
+  let pill = document.getElementById("offline-pill");
+  if (!pill) {
+    pill = document.createElement("div"); pill.id = "offline-pill"; pill.className = "offline-pill";
+    const greeting = document.getElementById("greeting"); if (greeting) greeting.after(pill);
+  }
+  pill.classList.toggle("visible", !!isOffline);
+  pill.textContent = isOffline ? `Offline · letzter Stand ${ts ? new Date(ts).toLocaleTimeString("de-DE", {hour:"2-digit",minute:"2-digit"}) : "gespeichert"}` : "";
+}
+
 
 // ==================== Navigation ====================
 
@@ -99,15 +131,19 @@ document.querySelectorAll(".tab").forEach((tab) => {
 // ==================== Daten laden ====================
 
 async function loadAll() {
-  const [timetable, exams, tasks, settings, notifications, grades] = await Promise.all([
+  const [timetable, exams, tasks, settings, notifications, grades, absences, materials, lessonNotes, studySessions] = await Promise.all([
     api("/api/timetable"),
     api("/api/exams"),
     api("/api/tasks"),
     api("/api/settings"),
     api("/api/notifications"),
     api("/api/grades"),
+    api("/api/absences"),
+    api("/api/materials"),
+    api("/api/lesson-notes"),
+    api("/api/study-sessions"),
   ]);
-  state = { ...state, timetable, exams, tasks, settings, notifications, grades };
+  state = { ...state, timetable, exams, tasks, settings, notifications, grades, absences, materials, lessonNotes, studySessions };
   renderAll();
 }
 
@@ -127,6 +163,7 @@ function renderAll() {
   renderEinstellungen();
   renderNotifications();
   renderNoten(state.grades || []);
+  renderSmartFeatures();
 }
 
 // ==================== Begrüßung ====================
@@ -184,6 +221,8 @@ function renderDashboard() {
     dueBox.innerHTML = soon.map((t) => renderTaskRow(t)).join("");
     attachTaskHandlers(dueBox);
   }
+  renderDashboardSmart(todaysLessons, nowMinutes);
+  applyDashboardVisibility();
 }
 
 function toMinutes(hhmm) {
@@ -451,6 +490,8 @@ function renderEinstellungen() {
 
   loadUntisSettings();
   renderTimeChips();
+  const widgets = normalizedDashboardWidgets();
+  document.querySelectorAll(".dashboard-widget-switch").forEach((sw) => sw.classList.toggle("on", widgets.includes(sw.dataset.widget)));
 }
 
 document.querySelectorAll(".switch[data-setting]").forEach((sw) => {
@@ -666,6 +707,241 @@ document.getElementById("save-task-btn").addEventListener("click", async () => {
   await loadAll();
   if (planMode === "woche") await loadWeekTimetable();
 });
+
+
+// ==================== Smart-Schulassistent ====================
+
+function normalizedDashboardWidgets() {
+  const v = state.settings.dashboard_widgets;
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string") { try { const x = JSON.parse(v); if (Array.isArray(x)) return x; } catch (_) {} }
+  return ["morning", "today", "tasks", "load"];
+}
+
+function applyDashboardVisibility() {
+  const widgets = normalizedDashboardWidgets();
+  const morning = document.getElementById("dashboard-morning-wrap");
+  const load = document.getElementById("dashboard-load-wrap");
+  const tasks = document.getElementById("dashboard-tasks")?.previousElementSibling;
+  if (morning) morning.style.display = widgets.includes("morning") ? "block" : "none";
+  if (load) load.style.display = widgets.includes("load") ? "block" : "none";
+  const due = document.getElementById("dashboard-tasks");
+  if (due) { due.style.display = widgets.includes("tasks") ? "block" : "none"; if (tasks) tasks.style.display = widgets.includes("tasks") ? "block" : "none"; }
+}
+
+document.querySelectorAll(".dashboard-widget-switch").forEach((sw) => {
+  sw.addEventListener("click", async () => {
+    const widget = sw.dataset.widget;
+    const widgets = normalizedDashboardWidgets();
+    const on = !widgets.includes(widget);
+    const next = on ? [...widgets, widget] : widgets.filter((x) => x !== widget);
+    state.settings.dashboard_widgets = next;
+    sw.classList.toggle("on", on);
+    await api("/api/settings", { method:"POST", body:JSON.stringify({ dashboard_widgets: next }) });
+    applyDashboardVisibility();
+  });
+});
+
+function uniqueSubjects() {
+  const set = new Set();
+  [...(state.timetable || []), ...(state.weekTimetable || [])].forEach((p) => { if (p.subject && p.subject !== "?") p.subject.split(",").forEach((x) => set.add(x.trim())); });
+  state.tasks.forEach((x) => x.fach && set.add(x.fach.trim()));
+  state.grades.forEach((x) => x.fach && set.add(x.fach.trim()));
+  state.materials.forEach((x) => x.fach && set.add(x.fach.trim()));
+  state.lessonNotes.forEach((x) => x.fach && set.add(x.fach.trim()));
+  return [...set].filter(Boolean).sort((a,b)=>a.localeCompare(b,"de"));
+}
+
+function allExamsSmart() {
+  const manual = state.tasks.filter((t) => t.typ === "pruefung" && t.faellig).map((t) => ({ name: `${t.fach}: ${t.text}`, fach:t.fach, date:t.faellig, manual:true }));
+  const untis = (state.exams || []).map((e) => ({...e, fach:e.name || "Prüfung"}));
+  const seen = new Set();
+  return [...untis, ...manual].filter((e) => {
+    const k = `${e.date}|${e.name}`; if (seen.has(k)) return false; seen.add(k); return e.date >= todayISO();
+  }).sort((a,b)=>a.date.localeCompare(b.date));
+}
+
+function dayLoad(date) {
+  const lessons = state.timetable.filter((p) => p.date === date && p.code !== "cancelled").length;
+  const tasks = state.tasks.filter((t) => t.faellig === date && t.typ !== "pruefung").length;
+  const exams = allExamsSmart().filter((e) => e.date === date).length;
+  const study = state.studySessions.filter((x) => x.date === date && !x.done).length;
+  const score = Math.min(10, Math.round((lessons * .65 + tasks * 1.7 + exams * 3.2 + study * .8) * 10) / 10);
+  return {score, lessons, tasks, exams, study};
+}
+
+function renderDashboardSmart(todaysLessons, nowMinutes) {
+  const brief = document.getElementById("morning-brief");
+  const active = todaysLessons.filter((x)=>x.code !== "cancelled");
+  let targetLessons = active, targetDate = todayISO(), lead = "Heute";
+  if (!active.length) {
+    const nextDate = [...new Set(state.timetable.filter((x)=>x.code!=="cancelled" && x.date>todayISO()).map((x)=>x.date))].sort()[0];
+    if (nextDate) { targetDate = nextDate; targetLessons = state.timetable.filter((x)=>x.date===nextDate && x.code!=="cancelled").sort((a,b)=>a.start.localeCompare(b.start)); lead = `${weekdayName(nextDate)}, ${fmtDate(nextDate)}`; }
+  }
+  const due = state.tasks.filter((t)=>t.faellig===targetDate).length;
+  const exam = allExamsSmart().find((e)=>e.date===targetDate);
+  if (!targetLessons.length) brief.innerHTML = `<div class="smart-kicker">${lead}</div><div class="smart-title">Kein Unterricht gefunden</div><div class="sub">Offene Aufgaben: ${state.tasks.length}</div>`;
+  else {
+    const first=targetLessons[0], last=targetLessons[targetLessons.length-1];
+    const changes=targetLessons.filter((x)=>x.code==="irregular" || x.code==="cancelled").length;
+    brief.innerHTML = `<div class="smart-kicker">${lead}</div><div class="smart-title">${escapeHtml(first.subject)} startet um ${first.start}</div><div class="sub">${targetLessons.length} Stunden · Schluss ${last.end}${due?` · ${due} fällig`:""}${exam?` · Prüfung: ${escapeHtml(exam.name)}`:""}${changes?` · ${changes} Änderung(en)`:""}</div>`;
+  }
+  const load=dayLoad(todayISO());
+  document.getElementById("today-load-score").textContent = load.score.toFixed(1);
+  document.getElementById("today-load-label").textContent = load.score >= 7 ? "voller Tag" : load.score >= 4 ? "mittel" : "eher entspannt";
+  const endEl=document.getElementById("school-end-countdown");
+  if (active.length) {
+    const end=toMinutes(active[active.length-1].end); const diff=end-nowMinutes;
+    endEl.textContent = diff>0 ? `${Math.floor(diff/60)}:${String(diff%60).padStart(2,"0")}` : "Fertig";
+  } else endEl.textContent="–";
+}
+
+function getNextSchoolDay() {
+  const dates=[...new Set(state.timetable.filter((p)=>p.code!=="cancelled" && p.date>todayISO()).map((p)=>p.date))].sort();
+  return dates[0] || addDaysISO(1);
+}
+
+function defaultMaterialsForSubject(subject) {
+  const s=subject.toLowerCase(); const list=[];
+  if (s.includes("sport")) list.push("Sportsachen");
+  if (s.includes("kunst")) list.push("Kunstmaterial");
+  if (s.includes("musik")) list.push("Musikmaterial / Instrument");
+  return list;
+}
+
+function packItemsForDate(date) {
+  const subjects=[...new Set(state.timetable.filter((p)=>p.date===date && p.code!=="cancelled").flatMap((p)=>p.subject.split(",").map((x)=>x.trim())))].filter(Boolean);
+  const items=["Hausaufgaben geprüft"];
+  for (const subject of subjects) {
+    for (const m of state.materials.filter((x)=>x.fach.toLowerCase()===subject.toLowerCase()).map((x)=>x.item)) if (!items.includes(m)) items.push(m);
+    for (const m of defaultMaterialsForSubject(subject)) if (!items.includes(m)) items.push(m);
+  }
+  return {subjects,items};
+}
+
+function renderPacklist() {
+  const el=document.getElementById("packlist-card"); if(!el) return;
+  const date=getNextSchoolDay(); const {subjects,items}=packItemsForDate(date);
+  if(!subjects.length){el.innerHTML=`<div class="empty-state">Für die nächsten Tage wurde kein Unterricht gefunden.</div>`;return;}
+  const key=`schulapp-pack:${date}`; let checked={}; try{checked=JSON.parse(localStorage.getItem(key)||"{}");}catch(_){ }
+  el.innerHTML=`<div class="smart-kicker">${weekdayName(date)} · ${fmtDate(date)}</div><div class="chip-row">${subjects.map((s)=>`<span class="smart-chip">${escapeHtml(s)}</span>`).join("")}</div><div style="margin-top:10px;">${items.map((item,i)=>`<div class="pack-item"><button class="pack-check ${checked[item]?"done":""}" data-pack="${escapeHtml(item)}">✓</button><div>${escapeHtml(item)}</div></div>`).join("")}</div>`;
+  el.querySelectorAll("[data-pack]").forEach((b)=>b.addEventListener("click",()=>{checked[b.dataset.pack]=!checked[b.dataset.pack];b.classList.toggle("done",checked[b.dataset.pack]);localStorage.setItem(key,JSON.stringify(checked));}));
+}
+
+function renderConflictAndLoad() {
+  const conflict=document.getElementById("conflict-card"); const map=document.getElementById("load-map"); if(!conflict||!map)return;
+  const due=[...state.tasks.filter((t)=>t.faellig).map((t)=>({date:t.faellig,label:`${t.fach}: ${t.text}`,kind:t.typ})),...allExamsSmart().map((e)=>({date:e.date,label:e.name,kind:"pruefung"}))];
+  const byDate={}; due.forEach((x)=>(byDate[x.date]||=[]).push(x));
+  const conflicts=Object.entries(byDate).filter(([,x])=>x.length>=2 && x.some((y)=>y.kind==="pruefung"));
+  if(conflicts.length) conflict.innerHTML=`<div class="smart-kicker">⚠️ Konfliktwarner</div>${conflicts.slice(0,3).map(([d,x])=>`<div class="smart-list-item"><div class="title">${weekdayName(d)}, ${fmtDate(d)} · ${x.length} wichtige Dinge</div><div class="meta">${x.map((y)=>escapeHtml(y.label)).join(" · ")}</div></div>`).join("")}`;
+  else conflict.innerHTML=`<div class="smart-kicker">✓ Konfliktwarner</div><div class="smart-title">Keine kritische Häufung</div><div class="sub">Aktuell liegen Prüfungen und Abgaben ausreichend verteilt.</div>`;
+  map.innerHTML=Array.from({length:7},(_,i)=>{const d=addDaysISO(i);const l=dayLoad(d);return `<div class="load-day" title="${l.lessons} Stunden, ${l.tasks} Aufgaben, ${l.exams} Prüfungen"><div class="d">${weekdayName(d).slice(0,2)}</div><div class="n">${fmtDate(d).slice(0,2)}</div><div class="load-bar"><i style="height:${Math.max(4,l.score*10)}%"></i></div></div>`}).join("");
+}
+
+function renderFreePeriods() {
+  const el=document.getElementById("free-periods-card"); if(!el)return;
+  const date=todayISO(); const lessons=state.timetable.filter((p)=>p.date===date&&p.code!=="cancelled").sort((a,b)=>a.start.localeCompare(b.start)); const gaps=[];
+  for(let i=0;i<lessons.length-1;i++){const mins=toMinutes(lessons[i+1].start)-toMinutes(lessons[i].end); if(mins>=45) gaps.push({start:lessons[i].end,end:lessons[i+1].start,mins});}
+  if(!gaps.length){el.innerHTML=`<div class="empty-state">Heute keine längere Freistunde erkannt.</div>`;return;}
+  const suggestion=chooseNextAction(25);
+  el.innerHTML=gaps.map((g)=>`<div class="smart-list-item"><div class="title">${g.start}–${g.end} · ${g.mins} Minuten frei</div><div class="meta">${suggestion?`Gute Gelegenheit: ${escapeHtml(suggestion.title)}`:"Zeit für Pause oder Vorbereitung."}</div></div>`).join("");
+}
+
+function chooseNextAction(minutes=25) {
+  const study=state.studySessions.filter((x)=>!x.done && x.date<=addDaysISO(3)).sort((a,b)=>a.date.localeCompare(b.date));
+  const tasks=[...state.tasks].sort((a,b)=>(a.faellig||"9999").localeCompare(b.faellig||"9999"));
+  const urgent=tasks.find((t)=>t.faellig && daysUntil(t.faellig)<=1);
+  if(urgent) return {kind:"task",id:urgent.id,title:`${urgent.fach}: ${urgent.text}`,sub:urgent.faellig?`fällig ${fmtDate(urgent.faellig)}`:"offen"};
+  const session=study.find((x)=>x.minutes<=minutes+15) || study[0];
+  if(session) return {kind:"study",id:session.id,title:`${session.fach}: ${session.title}`,sub:`${session.minutes} Min. · ${weekdayName(session.date)} ${fmtDate(session.date)}`};
+  const task=tasks[0]; if(task) return {kind:"task",id:task.id,title:`${task.fach}: ${task.text}`,sub:task.faellig?`fällig ${fmtDate(task.faellig)}`:"ohne Datum"};
+  return null;
+}
+
+let activeNextAction=null;
+function renderNextAction() {
+  const selected=document.querySelector("#timebox-segmented button.active"); const mins=Number(selected?.dataset.minutes||state.settings.assistant_timebox||25);
+  const action=chooseNextAction(mins); activeNextAction=action;
+  const title=document.getElementById("next-action-title"), sub=document.getElementById("next-action-sub"), done=document.getElementById("next-action-done"); if(!title)return;
+  if(!action){title.textContent="Alles Wichtige erledigt";sub.textContent="Nutze die Zeit für Pause, Wiederholung oder Vorbereitung.";done.style.display="none";}
+  else {title.textContent=action.title;sub.textContent=`Für dein ${mins}-Minuten-Fenster · ${action.sub}`;done.style.display="block";}
+}
+
+document.querySelectorAll("#timebox-segmented button").forEach((b)=>b.addEventListener("click",async()=>{document.querySelectorAll("#timebox-segmented button").forEach((x)=>x.classList.toggle("active",x===b));state.settings.assistant_timebox=b.dataset.minutes;await api("/api/settings",{method:"POST",body:JSON.stringify({assistant_timebox:b.dataset.minutes})});renderNextAction();}));
+
+document.getElementById("next-action-done")?.addEventListener("click",async()=>{if(!activeNextAction)return;if(activeNextAction.kind==="task")await api(`/api/tasks/${activeNextAction.id}`,{method:"PATCH",body:JSON.stringify({erledigt:true})});else await api(`/api/study-sessions/${activeNextAction.id}`,{method:"PATCH",body:JSON.stringify({done:true})});await loadAll();});
+
+function renderDayPlan() {
+  const el=document.getElementById("day-plan-card"); if(!el)return;
+  const lessons=state.timetable.filter((x)=>x.date===todayISO()&&x.code!=="cancelled").sort((a,b)=>a.end.localeCompare(b.end)); let start=lessons.length?toMinutes(lessons[lessons.length-1].end)+30:Math.max(14*60,new Date().getHours()*60+new Date().getMinutes());
+  const work=[]; const candidates=[];
+  state.tasks.slice(0,5).forEach((t)=>candidates.push({title:`${t.fach}: ${t.text}`,mins:25}));
+  state.studySessions.filter((x)=>!x.done&&x.date<=todayISO()).slice(0,4).forEach((x)=>candidates.push({title:`${x.fach}: ${x.title}`,mins:x.minutes}));
+  candidates.slice(0,5).forEach((x,i)=>{if(i>0){start+=10;} const end=start+x.mins; work.push({start,end,...x}); start=end;});
+  if(!work.length){el.innerHTML=`<div class="empty-state">Nach der Schule ist aktuell nichts eingeplant. 🎉</div>`;return;}
+  const hm=(m)=>`${String(Math.floor(m/60)%24).padStart(2,"0")}:${String(m%60).padStart(2,"0")}`;
+  el.innerHTML=work.map((x)=>`<div class="smart-list-item"><div class="title">${hm(x.start)}–${hm(x.end)} · ${escapeHtml(x.title)}</div><div class="meta">${x.mins} Minuten Fokus${x.mins>=40?" · danach kurze Pause":""}</div></div>`).join("");
+}
+
+function renderStudyPlanner() {
+  const examEl=document.getElementById("study-planner-exams"), sessions=document.getElementById("study-sessions-card"); if(!examEl||!sessions)return;
+  const exams=allExamsSmart().slice(0,5);
+  examEl.innerHTML=exams.length?exams.map((e,i)=>`<div class="card" style="margin-bottom:10px;"><div class="subject-top"><div><div class="task-fach">${escapeHtml(e.fach||e.name)}</div><div class="task-text">${escapeHtml(e.name)}</div><div class="task-due soon">${fmtDate(e.date)} · in ${Math.max(0,daysUntil(e.date))} Tagen</div></div><button class="icon-btn" data-generate-plan="${i}" title="Lernplan erstellen">＋</button></div></div>`).join(""):`<div class="empty-state">Keine kommende Prüfung gefunden.</div>`;
+  examEl.querySelectorAll("[data-generate-plan]").forEach((b)=>b.addEventListener("click",async()=>{const e=exams[Number(b.dataset.generatePlan)];await api("/api/study-plan/generate",{method:"POST",body:JSON.stringify({fach:e.fach||e.name,title:`Vorbereitung ${e.name}`,exam_date:e.date,minutes:30})});await loadAll();}));
+  const open=state.studySessions.filter((x)=>!x.done).slice(0,12);
+  sessions.innerHTML=open.length?open.map((x)=>`<div class="smart-list-item"><div class="title">${escapeHtml(x.fach)} · ${escapeHtml(x.title)}</div><div class="meta">${weekdayName(x.date)} ${fmtDate(x.date)} · ${x.minutes} Min.</div><button class="btn-primary study-done" data-study-done="${x.id}" style="margin-top:8px;padding:9px;">Einheit erledigt</button></div>`).join(""):`<div class="empty-state">Noch kein Lernplan aktiv.</div>`;
+  sessions.querySelectorAll("[data-study-done]").forEach((b)=>b.addEventListener("click",async()=>{await api(`/api/study-sessions/${b.dataset.studyDone}`,{method:"PATCH",body:JSON.stringify({done:true})});await loadAll();}));
+}
+
+function renderAbsences() {
+  const el=document.getElementById("absence-list"); if(!el)return;
+  el.innerHTML=state.absences.length?state.absences.map((a)=>{const notes=state.lessonNotes.filter((n)=>n.date>=a.start_date&&n.date<=a.end_date);const tasks=state.tasks.filter((t)=>t.faellig&&t.faellig>=a.start_date&&t.faellig<=addDaysToISO(a.end_date,3));return `<div class="card ${a.caught_up?"":"alert-card"}" style="margin-top:10px;"><div class="subject-top"><div><div class="task-fach">${fmtDate(a.start_date)}${a.end_date!==a.start_date?`–${fmtDate(a.end_date)}`:""}</div><div class="task-text">${escapeHtml(a.note||"Fehlzeit")}</div></div><span class="smart-chip">${a.caught_up?"✓ aufgeholt":"offen"}</span></div><div class="sub" style="margin-top:8px;">${notes.length} Unterrichtsnotizen · ${tasks.length} relevante offene Aufgaben</div>${notes.slice(0,3).map((n)=>`<div class="smart-list-item"><div class="title">${escapeHtml(n.fach)}</div><div class="meta">${escapeHtml(n.text)}</div></div>`).join("")}<div class="smart-grid" style="margin-top:8px;"><button class="btn-primary" data-absence-toggle="${a.id}" data-current="${a.caught_up}">${a.caught_up?"Wieder öffnen":"Als aufgeholt markieren"}</button><button class="btn-primary" data-absence-delete="${a.id}">Löschen</button></div></div>`}).join(""):`<div class="empty-state">Keine Fehlzeiten eingetragen.</div>`;
+  el.querySelectorAll("[data-absence-toggle]").forEach((b)=>b.addEventListener("click",async()=>{await api(`/api/absences/${b.dataset.absenceToggle}`,{method:"PATCH",body:JSON.stringify({caught_up:b.dataset.current!=="1"})});await loadAll();}));
+  el.querySelectorAll("[data-absence-delete]").forEach((b)=>b.addEventListener("click",async()=>{await api(`/api/absences/${b.dataset.absenceDelete}`,{method:"DELETE"});await loadAll();}));
+}
+
+document.getElementById("add-absence-btn")?.addEventListener("click",async()=>{const start=document.getElementById("absence-start").value||todayISO();const end=document.getElementById("absence-end").value||start;const note=document.getElementById("absence-note").value.trim();await api("/api/absences",{method:"POST",body:JSON.stringify({start_date:start,end_date:end,note})});document.getElementById("absence-note").value="";await loadAll();});
+
+document.getElementById("add-lesson-note-btn")?.addEventListener("click",async()=>{const fach=document.getElementById("lesson-note-subject").value.trim();const date=document.getElementById("lesson-note-date").value||todayISO();const text=document.getElementById("lesson-note-text").value.trim();if(!fach||!text)return;await api("/api/lesson-notes",{method:"POST",body:JSON.stringify({fach,date,text})});document.getElementById("lesson-note-text").value="";await loadAll();});
+
+let activeSubject=null;
+function renderSubjects() {
+  const el=document.getElementById("subject-cards"); if(!el)return;
+  const subjects=uniqueSubjects();
+  el.innerHTML=subjects.length?subjects.map((fach)=>{const grades=state.grades.filter((g)=>g.fach.toLowerCase()===fach.toLowerCase());const tasks=state.tasks.filter((t)=>t.fach.toLowerCase()===fach.toLowerCase()).length;let avg="–";if(grades.length){const w=grades.reduce((s,g)=>s+g.note*g.gewichtung,0), ws=grades.reduce((s,g)=>s+g.gewichtung,0);avg=(w/ws).toFixed(state.settings.notenskala==="oberstufe"?1:2);}return `<div class="card subject-card" data-subject="${escapeHtml(fach)}"><div class="subject-top"><div><div class="task-fach">${escapeHtml(fach)}</div><div class="sub">${tasks} offene Aufgaben · ${grades.length} Noten</div></div><div class="subject-stat">Ø ${avg}</div></div></div>`}).join(""):`<div class="empty-state">Noch keine Fächer erkannt.</div>`;
+  el.querySelectorAll("[data-subject]").forEach((card)=>card.addEventListener("click",()=>openSubject(card.dataset.subject)));
+}
+
+function openSubject(fach) {
+  activeSubject=fach; const body=document.getElementById("subject-sheet-body"); document.getElementById("subject-sheet-title").textContent=fach;
+  const eq=(x)=>(x||"").toLowerCase()===fach.toLowerCase(); const tasks=state.tasks.filter((t)=>eq(t.fach)); const grades=state.grades.filter((g)=>eq(g.fach)); const mats=state.materials.filter((m)=>eq(m.fach)); const notes=state.lessonNotes.filter((n)=>eq(n.fach)); const next=state.timetable.filter((p)=>p.date>=todayISO()&&p.subject.toLowerCase().includes(fach.toLowerCase())&&p.code!=="cancelled").sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start))[0];
+  let avg="–";if(grades.length){const w=grades.reduce((s,g)=>s+g.note*g.gewichtung,0),ws=grades.reduce((s,g)=>s+g.gewichtung,0);avg=(w/ws).toFixed(state.settings.notenskala==="oberstufe"?1:2);}
+  body.innerHTML=`<div class="smart-grid"><div class="card smart-mini"><div class="smart-kicker">Schnitt</div><div class="smart-big">${avg}</div></div><div class="card smart-mini"><div class="smart-kicker">Nächste Stunde</div><div class="smart-big" style="font-size:16px;">${next?`${weekdayName(next.date)} ${next.start}`:"–"}</div></div></div><div class="section-title">Offene Aufgaben</div>${tasks.length?tasks.map((t)=>`<div class="smart-list-item"><div class="title">${escapeHtml(t.text)}</div><div class="meta">${t.faellig?fmtDate(t.faellig):"kein Datum"}</div></div>`).join(""):`<div class="sub">Keine offenen Aufgaben.</div>`}<div class="section-title">Material</div>${mats.length?mats.map((m)=>`<div class="pack-item"><div style="flex:1">${escapeHtml(m.item)}</div><button class="icon-btn" data-delete-material="${m.id}" style="width:30px;height:30px;">×</button></div>`).join(""):`<div class="sub">Noch kein festes Material hinterlegt.</div>`}<div class="section-title">Unterrichtsnotizen</div>${notes.slice(0,8).map((n)=>`<div class="smart-list-item"><div class="title">${fmtDate(n.date)}</div><div class="meta">${escapeHtml(n.text)}</div></div>`).join("")||`<div class="sub">Noch keine Notizen.</div>`}`;
+  body.querySelectorAll("[data-delete-material]").forEach((b)=>b.addEventListener("click",async()=>{await api(`/api/materials/${b.dataset.deleteMaterial}`,{method:"DELETE"});await loadAll();openSubject(fach);}));
+  document.getElementById("subject-backdrop").classList.add("open");document.getElementById("subject-sheet").classList.add("open");
+}
+function closeSubject(){document.getElementById("subject-backdrop").classList.remove("open");document.getElementById("subject-sheet").classList.remove("open");}
+document.getElementById("subject-backdrop")?.addEventListener("click",closeSubject);
+document.getElementById("subject-material-add")?.addEventListener("click",async()=>{const item=document.getElementById("subject-material-input").value.trim();if(!item||!activeSubject)return;await api("/api/materials",{method:"POST",body:JSON.stringify({fach:activeSubject,item})});document.getElementById("subject-material-input").value="";await loadAll();openSubject(activeSubject);});
+
+function renderGradeCalculatorOptions() {
+  const sel=document.getElementById("grade-calc-subject");if(!sel)return;const current=sel.value;const subjects=[...new Set(state.grades.map((g)=>g.fach))].sort();sel.innerHTML=`<option value="">Fach wählen</option>`+subjects.map((s)=>`<option ${s===current?"selected":""}>${escapeHtml(s)}</option>`).join("");
+  const skala=state.settings.notenskala||"unterstufe";const next=document.getElementById("grade-calc-next");if(next){next.min=skala==="oberstufe"?0:1;next.max=skala==="oberstufe"?15:6;next.step=skala==="oberstufe"?1:.5;}
+}
+
+document.getElementById("grade-calc-btn")?.addEventListener("click",()=>{const fach=document.getElementById("grade-calc-subject").value;const next=Number(document.getElementById("grade-calc-next").value),weight=Number(document.getElementById("grade-calc-weight").value||1),target=Number(document.getElementById("grade-calc-target").value);const out=document.getElementById("grade-calc-result");const grades=state.grades.filter((g)=>g.fach===fach);if(!fach||!grades.length||Number.isNaN(next)){out.textContent="Bitte Fach und nächste Note eintragen.";return;}const sum=grades.reduce((s,g)=>s+g.note*g.gewichtung,0),w=grades.reduce((s,g)=>s+g.gewichtung,0),after=(sum+next*weight)/(w+weight);let text=`Neuer Schnitt: ${after.toFixed(2)} (vorher ${(sum/w).toFixed(2)}).`;if(target){const needed=(target*(w+weight)-sum)/weight;const skala=state.settings.notenskala||"unterstufe";if(skala==="oberstufe") text+=` Für Ø ${target} wären rechnerisch ${needed.toFixed(1)} NP nötig.`;else text+=` Für Ø ${target} wäre rechnerisch Note ${needed.toFixed(2)} nötig.`;}out.textContent=text;});
+
+function renderNotificationPriority() {
+  // Vorhandenes Notification-Center bleibt die Quelle; Smart-Ansicht priorisiert nur visuell.
+  const list=document.getElementById("notif-list"); if(!list)return;
+  list.querySelectorAll(".notif-item").forEach((el)=>{const txt=el.textContent.toLowerCase();if(txt.includes("fällt aus")||txt.includes("prüfung")||txt.includes("verschoben")) el.classList.add("alert-card");});
+}
+
+function renderSmartFeatures() {
+  const saved=String(state.settings.assistant_timebox||"25");document.querySelectorAll("#timebox-segmented button").forEach((b)=>b.classList.toggle("active",b.dataset.minutes===saved));
+  const aStart=document.getElementById("absence-start"),aEnd=document.getElementById("absence-end"),nDate=document.getElementById("lesson-note-date");if(aStart&&!aStart.value)aStart.value=todayISO();if(aEnd&&!aEnd.value)aEnd.value=todayISO();if(nDate&&!nDate.value)nDate.value=todayISO();
+  renderNextAction();renderPacklist();renderConflictAndLoad();renderFreePeriods();renderDayPlan();renderStudyPlanner();renderAbsences();renderSubjects();renderGradeCalculatorOptions();renderNotificationPriority();applyDashboardVisibility();
+}
 
 // ==================== Push-Benachrichtigungen ====================
 
